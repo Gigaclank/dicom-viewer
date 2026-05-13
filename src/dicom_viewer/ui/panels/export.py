@@ -68,13 +68,15 @@ class _ExportWorker(QThread):
 
 
 class ExportPanel(QWidget):
-    """STL export controls plus a 'Preview mesh' action.
+    """STL export controls.
 
-    `mesh_ready` is emitted whenever generate_mesh produces a result; consumers
-    (e.g. MeshPreviewDialog) can subscribe to update their display.
+    `settings_changed` fires whenever a slider/checkbox value changes so the
+    STL Preview tab can refresh. `mesh_ready` still fires after a successful
+    Export STL (some tests rely on it).
     """
 
-    mesh_ready = pyqtSignal(object)  # forwards _ExportWorker.mesh_ready
+    settings_changed = pyqtSignal()
+    mesh_ready = pyqtSignal(object)
 
     def __init__(self, document: Document) -> None:
         super().__init__()
@@ -88,9 +90,9 @@ class ExportPanel(QWidget):
         self.manifold_checkbox = QCheckBox("Ensure manifold (recommended)")
         self.manifold_checkbox.setChecked(True)
 
-        self.preview_button = QPushButton("Preview mesh")
-        self.preview_button.clicked.connect(self._on_preview_clicked)
-        self.preview_button.setEnabled(False)
+        self.smoothing_slider.valueChanged.connect(lambda _v: self.settings_changed.emit())
+        self.decimation_slider.valueChanged.connect(lambda _v: self.settings_changed.emit())
+        self.manifold_checkbox.toggled.connect(lambda _on: self.settings_changed.emit())
 
         self.export_button = QPushButton("Export STL…")
         self.export_button.clicked.connect(self._on_export_clicked)
@@ -107,7 +109,6 @@ class ExportPanel(QWidget):
         form.addRow(self.manifold_checkbox)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(self.preview_button)
         layout.addWidget(self.export_button)
         layout.addWidget(self._status)
 
@@ -121,14 +122,9 @@ class ExportPanel(QWidget):
             self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
-        ok = self._document.segmentation is not None
-        self.preview_button.setEnabled(ok)
-        self.export_button.setEnabled(ok)
+        self.export_button.setEnabled(self._document.segmentation is not None)
 
     # --- actions ---
-    def _on_preview_clicked(self) -> None:
-        self._run_worker(out_path=None)
-
     def _on_export_clicked(self) -> None:
         out_str, _ = QFileDialog.getSaveFileName(
             self, "Export STL", self._suggested_filename(), "STL files (*.stl)"
@@ -172,6 +168,15 @@ class ExportPanel(QWidget):
         self._status.setText(f"Export failed: {msg}")
         self._status.setToolTip("")
         QMessageBox.critical(self, "Export failed", msg)
+
+    # --- live access for consumers (preview tab) ---
+    def get_export_options(self) -> ExportOptions:
+        """Snapshot of the export controls as the dataclass generate_mesh wants."""
+        return ExportOptions(
+            smoothing_iterations=self.smoothing_slider.value(),
+            decimation_target_reduction=self.decimation_slider.float_value(),
+            ensure_manifold=self.manifold_checkbox.isChecked(),
+        )
 
     # --- project file integration ---
     def get_settings(self) -> ExportSettings:

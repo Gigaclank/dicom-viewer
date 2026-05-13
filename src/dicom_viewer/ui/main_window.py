@@ -39,7 +39,7 @@ from dicom_viewer.io.project import (
 from dicom_viewer.ui.panels.export import ExportPanel
 from dicom_viewer.ui.panels.segmentation import SegmentationPanel
 from dicom_viewer.ui.panels.windowing import WindowingPanel
-from dicom_viewer.ui.widgets.mesh_preview_dialog import MeshPreviewDialog
+from dicom_viewer.ui.widgets.mesh_preview_view import MeshPreviewView
 from dicom_viewer.ui.widgets.slice_view import SliceView
 from dicom_viewer.ui.widgets.volume3d_view import Volume3DView
 
@@ -57,17 +57,20 @@ class MainWindow(QMainWindow):
         self.sagittal = SliceView(Orientation.SAGITTAL)
         self.volume3d = Volume3DView()
 
+        self.windowing_panel = WindowingPanel(self.document)
+        self.segmentation_panel = SegmentationPanel(self.document)
+        self.export_panel = ExportPanel(self.document)
+        self.stl_preview = MeshPreviewView(self.document, self.export_panel)
+
         self.view_tabs = QTabWidget()
         self.view_tabs.addTab(self.axial, "Axial")
         self.view_tabs.addTab(self.coronal, "Coronal")
         self.view_tabs.addTab(self.sagittal, "Sagittal")
         self.view_tabs.addTab(self.volume3d, "3D")
+        self.view_tabs.addTab(self.stl_preview, "STL Preview")
+        self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
         self.setCentralWidget(self.view_tabs)
 
-        self.windowing_panel = WindowingPanel(self.document)
-        self.segmentation_panel = SegmentationPanel(self.document)
-        self.export_panel = ExportPanel(self.document)
-        self._preview_dialog: MeshPreviewDialog | None = None
         self._current_project_path: Path | None = None
         # Last source loaded (folder or file) — saved into projects so they can
         # re-open the same DICOM data without the user picking it again.
@@ -75,7 +78,6 @@ class MainWindow(QMainWindow):
         # All studies pulled from the most recent folder (or [study] for a file).
         # The series picker switches the active one without re-loading the folder.
         self._loaded_studies: list[Study] = []
-        self.export_panel.mesh_ready.connect(self._on_mesh_ready)
 
         tabs = QTabWidget()
         tabs.addTab(self.windowing_panel, "Windowing")
@@ -333,28 +335,18 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(base)
 
-    def _on_mesh_ready(self, mesh) -> None:
-        # Build a fresh dialog each time. Reusing the dialog (and the
-        # QVTKRenderWindowInteractor inside it) led to a blank second preview
-        # and an unresponsive close button on some platforms.
-        prev_geometry = None
-        if self._preview_dialog is not None:
-            prev_geometry = self._preview_dialog.geometry()
-            self._preview_dialog.close()
-            self._preview_dialog.deleteLater()
-        self._preview_dialog = MeshPreviewDialog(parent=self)
-        if prev_geometry is not None:
-            self._preview_dialog.setGeometry(prev_geometry)
-        self._preview_dialog.set_mesh(mesh)
-        self._preview_dialog.show()
-        self._preview_dialog.raise_()
-        self._preview_dialog.activateWindow()
+    def _on_view_tab_changed(self, index: int) -> None:
+        # Tell the STL preview widget whether its tab is currently visible so
+        # it only does the (potentially expensive) mesh pipeline work when the
+        # user is actually looking at it.
+        self.stl_preview.set_tab_visible(self.view_tabs.widget(index) is self.stl_preview)
 
     def _on_reset_views(self) -> None:
         self.axial.reset_view()
         self.coronal.reset_view()
         self.sagittal.reset_view()
         self.volume3d.reset_view()
+        self.stl_preview._on_reset_clicked()
 
     def _on_doc_event(self, kind: str) -> None:
         volume = self.document.volume

@@ -51,56 +51,40 @@ def test_export_writes_stl_file(qtbot, tmp_path):
     assert out.stat().st_size > 84
 
 
-def test_preview_button_disabled_without_segmentation(qtbot):
-    doc = Document()
-    panel = ExportPanel(doc)
-    qtbot.addWidget(panel)
-    assert not panel.preview_button.isEnabled()
-
-
-def test_preview_emits_mesh_ready_signal(qtbot):
+def test_settings_changed_signal_fires_on_slider_movement(qtbot):
+    """The STL Preview tab listens to this signal to auto-refresh."""
     doc = _doc_with_segmentation()
     panel = ExportPanel(doc)
     qtbot.addWidget(panel)
-    received: list[object] = []
-    panel.mesh_ready.connect(received.append)
-    panel.preview_button.click()
-    assert len(received) == 1
-    mesh = received[0]
-    assert mesh.triangle_count > 0
+    fires: list[int] = []
+    panel.settings_changed.connect(lambda: fires.append(1))
+
+    panel.smoothing_slider.setValue(20)
+    panel.decimation_slider.setFloatValue(0.3)
+    panel.manifold_checkbox.setChecked(False)
+
+    assert sum(fires) >= 3
 
 
-def test_preview_does_not_write_file(qtbot, tmp_path):
-    doc = _doc_with_segmentation()
-    panel = ExportPanel(doc)
-    qtbot.addWidget(panel)
-    # Cwd is unaffected by preview — no STL written anywhere.
-    panel.preview_button.click()
-    assert list(tmp_path.glob("*.stl")) == []
-
-
-def test_preview_clicked_twice_yields_two_valid_meshes(qtbot):
-    """Regression: a second preview must work just like the first.
-
-    Was failing because generate_mesh returned a polydata still owned by the
-    pipeline filters, and reusing the same MeshPreviewDialog left the VTK
-    render widget in a state that blanked out the second mesh and prevented
-    the close button from responding.
-    """
+def test_export_writes_stl_and_deep_copies_polydata(qtbot, tmp_path):
+    """Regression: generate_mesh used to return a polydata still owned by
+    the pipeline filters; once that pipeline went out of scope the data
+    could end up inconsistent. Now it's deep-copied — verify."""
     doc = _doc_with_segmentation()
     panel = ExportPanel(doc)
     qtbot.addWidget(panel)
     received: list[object] = []
     panel.mesh_ready.connect(received.append)
 
-    panel.preview_button.click()
-    panel.preview_button.click()
+    out_a = tmp_path / "a.stl"
+    out_b = tmp_path / "b.stl"
+    panel.run_export(out_a)
+    panel.run_export(out_b)
 
+    assert out_a.exists() and out_b.exists()
     assert len(received) == 2
     for mesh in received:
         assert mesh.triangle_count > 0
-        # The polydata must still be valid after the worker that produced it
-        # has exited (deep-copied output, not pipeline-owned).
         assert mesh.polydata.GetNumberOfPolys() == mesh.triangle_count
 
 
