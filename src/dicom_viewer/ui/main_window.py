@@ -152,6 +152,12 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("Loading DICOM folder")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
+        # By default QProgressDialog auto-closes / auto-resets when value hits
+        # 100, and the reset emits canceled(). That makes the worker's normal
+        # 'Done, 1.0' progress event look like a user cancel. Turn both off
+        # and close the dialog explicitly from the worker callbacks instead.
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
         # Cancel: ask the worker (politely) to stop. The worker's load loop
         # checks isInterruptionRequested between files and between decoded
         # slices, and short-circuits via LoaderCancelled.
@@ -183,13 +189,17 @@ class MainWindow(QMainWindow):
         dialog.exec()
         worker.wait()
 
-        if state.get("cancelled"):
-            return False
-        if "error" in state:
+        # Result wins over cancel — a real completion that races with a
+        # spurious cancel signal must still load the data.
+        result = state.get("result")
+        if isinstance(result, LoadResult):
+            pass  # fall through to the success path below
+        elif "error" in state:
             QMessageBox.warning(self, "Load failed", str(state["error"]))
             return False
-        result = state.get("result")
-        if not isinstance(result, LoadResult):
+        elif state.get("cancelled"):
+            return False
+        else:
             return False
 
         # Cache every study so the user can switch series without reloading.

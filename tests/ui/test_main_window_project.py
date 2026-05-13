@@ -107,6 +107,20 @@ def test_project_remembers_active_series_uid(qtbot, tmp_path):
     assert win2.document.study.series_uid == expected_uid
 
 
+def test_open_folder_path_returns_true_on_real_load(qtbot, tmp_path):
+    """Regression: QProgressDialog.setValue(100) fired by the worker's final
+    progress event used to auto-close + emit canceled(), which the open
+    handler treated as a user cancel. The function returned False, the study
+    never reached the document, and the views stayed empty. We now disable
+    autoClose/autoReset and let result-set win over cancel-set."""
+    series_dir = make_synthetic_ct_series(tmp_path, shape=(4, 8, 8))
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.open_folder_path(series_dir) is True
+    assert win.document.study is not None
+    assert win.document.volume.shape == (4, 8, 8)
+
+
 def test_load_corrupt_project_does_not_crash(qtbot, tmp_path, monkeypatch):
     bad = tmp_path / f"bad{PROJECT_EXTENSION}"
     bad.write_text("not even json", encoding="utf-8")
