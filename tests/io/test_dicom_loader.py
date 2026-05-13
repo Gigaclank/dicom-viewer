@@ -126,6 +126,30 @@ def test_load_tolerates_none_slice_thickness(tmp_path):
     assert result.studies[0].spacing_mm[0] == pytest.approx(2.0)
 
 
+def test_loader_progress_callback_is_invoked(tmp_path):
+    folder = make_synthetic_ct_series(tmp_path, shape=(4, 8, 8))
+    events: list[tuple[str, float]] = []
+    load_series_from_folder(folder, progress=lambda stage, frac: events.append((stage, frac)))
+    assert events  # at least one progress callback
+    assert events[-1] == ("Done", 1.0)
+    # All fractions must be in [0, 1] and the sequence must be non-decreasing.
+    for stage, frac in events:
+        assert 0.0 <= frac <= 1.0
+        assert isinstance(stage, str)
+    fractions = [f for _s, f in events]
+    assert all(b >= a for a, b in zip(fractions, fractions[1:]))
+
+
+def test_loader_progress_callback_failure_does_not_break_load(tmp_path):
+    folder = make_synthetic_ct_series(tmp_path, shape=(3, 4, 4))
+
+    def boom(_stage: str, _frac: float) -> None:
+        raise RuntimeError("intentional")
+
+    result = load_series_from_folder(folder, progress=boom)
+    assert len(result.studies) == 1
+
+
 def test_load_folder_skips_a_broken_series_keeps_good_ones(tmp_path):
     """A pathological series shouldn't take down the whole folder load."""
     import pydicom

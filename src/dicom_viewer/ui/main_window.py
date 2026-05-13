@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QTabWidget,
     QToolBar,
 )
@@ -23,6 +24,7 @@ from dicom_viewer.core.volume import Orientation
 from dicom_viewer.io.config import save_last_project
 from dicom_viewer.io.dicom_loader import (
     LoaderError,
+    LoadResult,
     load_series_from_file,
     load_series_from_folder,
 )
@@ -142,14 +144,47 @@ class MainWindow(QMainWindow):
         self.open_folder_path(Path(folder))
 
     def open_folder_path(self, folder: Path, preferred_series_uid: str = "") -> bool:
-        try:
-            result = load_series_from_folder(folder)
-        except LoaderError as e:
-            QMessageBox.warning(self, "Load failed", str(e))
+        # Run the load in a worker thread with a modal progress dialog so the
+        # UI stays responsive on big folders (500+ files = many seconds).
+        worker = _FolderLoadWorker(Path(folder))
+        dialog = QProgressDialog("Scanning folder…", None, 0, 100, self)
+        dialog.setWindowTitle("Loading DICOM folder")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        # Suppress the cancel button — we don't currently support aborting
+        # mid-decode (the C extensions don't expose a cancel hook).
+        dialog.setCancelButton(None)  # type: ignore[arg-type]
+
+        state: dict[str, object] = {}
+
+        def on_progress(stage: str, fraction: float) -> None:
+            dialog.setLabelText(stage)
+            dialog.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+
+        def on_finished_ok(result: LoadResult) -> None:
+            state["result"] = result
+            dialog.close()
+
+        def on_failed(msg: str) -> None:
+            state["error"] = msg
+            dialog.close()
+
+        worker.progress.connect(on_progress)
+        worker.finished_ok.connect(on_finished_ok)
+        worker.failed.connect(on_failed)
+        worker.start()
+        dialog.exec()
+        worker.wait()
+
+        if "error" in state:
+            QMessageBox.warning(self, "Load failed", str(state["error"]))
             return False
+        result = state.get("result")
+        if not isinstance(result, LoadResult):
+            return False
+
         # Cache every study so the user can switch series without reloading.
         self._loaded_studies = list(result.studies)
-        # Pick the preferred series if it's there, else the first.
         chosen = self._loaded_studies[0]
         if preferred_series_uid:
             for s in self._loaded_studies:
@@ -370,3 +405,27 @@ class MainWindow(QMainWindow):
             self.volume3d.set_overlay_mask(mask)
         if kind in ("study", "region"):
             self.volume3d.set_region(self.document.region)
+
+
+class _FolderLoadWorker(QThread):
+    """Runs load_series_from_folder off the UI thread, reports progress."""
+
+    progress = pyqtSignal(str, float)
+    finished_ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, folder: Path) -> None:
+        super().__init__()
+        self._folder = folder
+
+    def run(self) -> None:
+        try:
+            result = load_series_from_folder(
+                self._folder,
+                progress=lambda stage, frac: self.progress.emit(stage, frac),
+            )
+            self.finished_ok.emit(result)
+        except LoaderError as e:
+            self.failed.emit(str(e))
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"{type(e).__name__}: {e}")
