@@ -112,12 +112,19 @@ jobs:
       - name: Bundle with PyInstaller
         run: pyinstaller --noconfirm dicom-viewer.spec
 
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
       - name: Build NSIS installer
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v',''
-          # NSIS is preinstalled on the github-windows runner.
-          makensis "/DAPP_VERSION=$version" scripts\dicom-viewer.nsi
+          # `choco install nsis` puts makensis in C:\Program Files (x86)\NSIS\.
+          $nsis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $nsis)) { $nsis = "makensis" }
+          & $nsis "/DAPP_VERSION=$version" scripts\dicom-viewer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
           echo "VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Upload installer

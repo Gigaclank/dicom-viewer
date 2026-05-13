@@ -1,8 +1,6 @@
 """Preview the generated mesh before STL export."""
 from __future__ import annotations
 
-import os
-
 import vtk
 
 from dicom_viewer.core.mesh_export import Mesh

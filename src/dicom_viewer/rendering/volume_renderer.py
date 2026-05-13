@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 import vtk
@@ -32,7 +33,7 @@ class VolumeRenderer:
         self._home_view_up: tuple[float, float, float] | None = None
         self._home_parallel_scale: float | None = None
 
-        if os.environ.get("DICOM_VIEWER_OFFSCREEN") == "1":
+        if os.environ.get("DICOM_VIEWER_OFFSCREEN") == "1" and sys.platform != "win32":
             rw = vtk.vtkRenderWindow()
             rw.SetOffScreenRendering(1)
             rw.AddRenderer(self._renderer)
