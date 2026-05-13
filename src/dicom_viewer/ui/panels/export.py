@@ -7,13 +7,11 @@ from pathlib import Path
 from PyQt6.QtCore import QCoreApplication, Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QLabel,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +24,7 @@ from dicom_viewer.core.mesh_export import (
     export_stl,
     generate_mesh,
 )
+from dicom_viewer.ui.widgets.labeled_slider import LabeledFloatSlider, LabeledSlider
 
 
 class _ExportWorker(QThread):
@@ -80,14 +79,10 @@ class ExportPanel(QWidget):
         super().__init__()
         self._document = document
 
-        self.smoothing_spin = QSpinBox()
-        self.smoothing_spin.setRange(0, 200)
-        self.smoothing_spin.setValue(15)
-
-        self.decimation_spin = QDoubleSpinBox()
-        self.decimation_spin.setRange(0.0, 0.95)
-        self.decimation_spin.setSingleStep(0.05)
-        self.decimation_spin.setValue(0.5)
+        # Reasonable practical limits — values above 50 smoothing iterations or
+        # above ~0.9 decimation rarely produce better results.
+        self.smoothing_slider = LabeledSlider(0, 50, 15)
+        self.decimation_slider = LabeledFloatSlider(0.0, 0.95, 0.5, step=0.05, decimals=2)
 
         self.manifold_checkbox = QCheckBox("Ensure manifold (recommended)")
         self.manifold_checkbox.setChecked(True)
@@ -106,8 +101,8 @@ class ExportPanel(QWidget):
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         form = QFormLayout()
-        form.addRow("Smoothing iterations", self.smoothing_spin)
-        form.addRow("Decimation reduction", self.decimation_spin)
+        form.addRow("Smoothing iterations", self.smoothing_slider)
+        form.addRow("Decimation reduction", self.decimation_slider)
         form.addRow(self.manifold_checkbox)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -147,8 +142,8 @@ class ExportPanel(QWidget):
 
     def _run_worker(self, out_path: Path | None) -> None:
         options = ExportOptions(
-            smoothing_iterations=self.smoothing_spin.value(),
-            decimation_target_reduction=float(self.decimation_spin.value()),
+            smoothing_iterations=self.smoothing_slider.value(),
+            decimation_target_reduction=self.decimation_slider.float_value(),
             ensure_manifold=self.manifold_checkbox.isChecked(),
         )
         worker = _ExportWorker(self._document, options, out_path)

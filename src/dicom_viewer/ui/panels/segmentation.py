@@ -1,7 +1,6 @@
 """Segmentation panel — threshold + region-grow methods with live preview."""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -9,8 +8,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSlider,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -19,38 +16,7 @@ from dicom_viewer.core.document import Document
 from dicom_viewer.core.segmentation.morphology import keep_largest_component, smooth_mask
 from dicom_viewer.core.segmentation.region_grow import region_grow
 from dicom_viewer.core.segmentation.threshold import threshold
-
-
-class _LabeledSlider(QWidget):
-    """A horizontal slider with a numeric readout label."""
-
-    valueChanged = pyqtSignal(int)
-
-    def __init__(self, lo: int, hi: int, initial: int) -> None:
-        super().__init__()
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(lo, hi)
-        self.slider.setValue(initial)
-        self.value_label = QLabel(str(initial))
-        self.value_label.setMinimumWidth(60)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.slider, stretch=1)
-        layout.addWidget(self.value_label)
-        self.slider.valueChanged.connect(self._on_changed)
-
-    def _on_changed(self, v: int) -> None:
-        self.value_label.setText(str(v))
-        self.valueChanged.emit(v)
-
-    def value(self) -> int:
-        return int(self.slider.value())
-
-    def setValue(self, v: int) -> None:  # noqa: N802 — Qt-style API
-        self.slider.setValue(int(v))
-
-    def setRange(self, lo: int, hi: int) -> None:  # noqa: N802 — Qt-style API
-        self.slider.setRange(int(lo), int(hi))
+from dicom_viewer.ui.widgets.labeled_slider import LabeledSlider
 
 
 class SegmentationPanel(QWidget):
@@ -63,17 +29,18 @@ class SegmentationPanel(QWidget):
         self.method_combo.addItems(["Threshold", "Region grow"])
         self.method_combo.currentTextChanged.connect(self._on_method_changed)
 
-        self.low_slider = _LabeledSlider(-2000, 10000, 300)
-        self.high_slider = _LabeledSlider(-2000, 10000, 3000)
+        self.low_slider = LabeledSlider(-2000, 10000, 300)
+        self.high_slider = LabeledSlider(-2000, 10000, 3000)
         self.low_slider.valueChanged.connect(self._on_threshold_changed)
         self.high_slider.valueChanged.connect(self._on_threshold_changed)
 
-        self.seed_z = QSpinBox(); self.seed_z.setRange(0, 100000)
-        self.seed_y = QSpinBox(); self.seed_y.setRange(0, 100000)
-        self.seed_x = QSpinBox(); self.seed_x.setRange(0, 100000)
-        self.tolerance_spin = QSpinBox()
-        self.tolerance_spin.setRange(0, 10000)
-        self.tolerance_spin.setValue(100)
+        # Region-grow seed coordinates: ranges adapt to the loaded volume's
+        # shape; before any volume is loaded they cap at 4096 (well past any
+        # practical scan dimension).
+        self.seed_z = LabeledSlider(0, 4096, 0)
+        self.seed_y = LabeledSlider(0, 4096, 0)
+        self.seed_x = LabeledSlider(0, 4096, 0)
+        self.tolerance_slider = LabeledSlider(0, 1000, 100)
 
         self.largest_component_checkbox = QCheckBox("Keep largest connected component")
         self.largest_component_checkbox.setChecked(True)
@@ -102,13 +69,10 @@ class SegmentationPanel(QWidget):
         form.addRow("Low", self.low_slider)
         form.addRow("High", self.high_slider)
 
-        seed_row = QHBoxLayout()
-        seed_row.addWidget(QLabel("seed z/y/x:"))
-        seed_row.addWidget(self.seed_z)
-        seed_row.addWidget(self.seed_y)
-        seed_row.addWidget(self.seed_x)
-        form.addRow(seed_row)
-        form.addRow("Tolerance", self.tolerance_spin)
+        form.addRow("Seed z", self.seed_z)
+        form.addRow("Seed y", self.seed_y)
+        form.addRow("Seed x", self.seed_x)
+        form.addRow("Tolerance", self.tolerance_slider)
         form.addRow(self.largest_component_checkbox)
         form.addRow(self.smooth_checkbox)
         form.addRow(self.live_preview_checkbox)
@@ -157,7 +121,7 @@ class SegmentationPanel(QWidget):
             seg = region_grow(
                 volume,
                 seed=(self.seed_z.value(), self.seed_y.value(), self.seed_x.value()),
-                tolerance=self.tolerance_spin.value(),
+                tolerance=self.tolerance_slider.value(),
             )
         if self.largest_component_checkbox.isChecked():
             seg = keep_largest_component(seg)
@@ -183,15 +147,22 @@ class SegmentationPanel(QWidget):
         lo, hi = volume.intensity_range()
         pad = max(int((hi - lo) * 0.05), 1)
         lo_i, hi_i = int(lo - pad), int(hi + pad)
+        sz, sy, sx = volume.shape
         # Suppress live preview while reconfiguring; defaults shouldn't auto-segment.
         self._suppress_live = True
         try:
             self.low_slider.setRange(lo_i, hi_i)
             self.high_slider.setRange(lo_i, hi_i)
-            # Sensible defaults: low = midpoint, high = max — user usually
-            # narrows the low edge to isolate bone / a tissue class.
             mid = int(lo + (hi - lo) * 0.5)
             self.low_slider.setValue(mid)
             self.high_slider.setValue(int(hi))
+            # Region-grow seed sliders track volume shape so the slider
+            # range never lets you pick a seed outside the data.
+            self.seed_z.setRange(0, max(sz - 1, 0))
+            self.seed_y.setRange(0, max(sy - 1, 0))
+            self.seed_x.setRange(0, max(sx - 1, 0))
+            self.seed_z.setValue(sz // 2)
+            self.seed_y.setValue(sy // 2)
+            self.seed_x.setValue(sx // 2)
         finally:
             self._suppress_live = False
