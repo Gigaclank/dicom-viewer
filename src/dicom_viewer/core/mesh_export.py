@@ -96,7 +96,14 @@ def generate_mesh(
         normals.Update()
         pipeline = normals
 
-    poly: vtk.vtkPolyData = pipeline.GetOutput()
+    # Deep-copy the output so the returned Mesh is independent of the local
+    # pipeline filters. Without this, the polydata is owned by the last filter's
+    # output port; once that filter is garbage-collected (when this function
+    # returns, or when the worker thread that called it exits) the data can end
+    # up in an inconsistent state, causing blank renders or crashes on the
+    # second use.
+    poly = vtk.vtkPolyData()
+    poly.DeepCopy(pipeline.GetOutput())
     n_tri = int(poly.GetNumberOfPolys())
     if n_tri == 0:
         raise EmptyMeshError("mesh has zero triangles after processing")

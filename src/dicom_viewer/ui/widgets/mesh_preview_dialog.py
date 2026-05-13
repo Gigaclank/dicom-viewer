@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -21,7 +22,10 @@ class MeshPreviewDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("STL Preview")
-        self.setWindowFlag(Qt.WindowType.Window)  # independent window with own title bar
+        # QDialog is already a top-level window; no extra window-flag setup
+        # needed. The dialog is recreated on each preview by MainWindow, so we
+        # don't use WA_DeleteOnClose here — it would clash with the controller
+        # holding a reference until it picks a new one.
         self.resize(640, 480)
 
         self._preview = MeshPreview()
@@ -67,3 +71,15 @@ class MeshPreviewDialog(QDialog):
         )
         if hasattr(self._vtk_widget, "GetRenderWindow"):
             self._preview.render()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        # Tell the embedded VTK widget to tear down its render window cleanly
+        # before this dialog is hidden / destroyed. Without this, the VTK GL
+        # context can be left in a bad state on some platforms, which prevents
+        # the next preview dialog from rendering.
+        if hasattr(self._vtk_widget, "close"):
+            try:
+                self._vtk_widget.close()
+            except Exception:
+                pass
+        super().closeEvent(event)

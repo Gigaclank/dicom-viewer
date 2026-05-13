@@ -79,6 +79,31 @@ def test_preview_does_not_write_file(qtbot, tmp_path):
     assert list(tmp_path.glob("*.stl")) == []
 
 
+def test_preview_clicked_twice_yields_two_valid_meshes(qtbot):
+    """Regression: a second preview must work just like the first.
+
+    Was failing because generate_mesh returned a polydata still owned by the
+    pipeline filters, and reusing the same MeshPreviewDialog left the VTK
+    render widget in a state that blanked out the second mesh and prevented
+    the close button from responding.
+    """
+    doc = _doc_with_segmentation()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    received: list[object] = []
+    panel.mesh_ready.connect(received.append)
+
+    panel.preview_button.click()
+    panel.preview_button.click()
+
+    assert len(received) == 2
+    for mesh in received:
+        assert mesh.triangle_count > 0
+        # The polydata must still be valid after the worker that produced it
+        # has exited (deep-copied output, not pipeline-owned).
+        assert mesh.polydata.GetNumberOfPolys() == mesh.triangle_count
+
+
 def test_status_label_shows_filename_not_full_path(qtbot, tmp_path):
     doc = _doc_with_segmentation()
     panel = ExportPanel(doc)

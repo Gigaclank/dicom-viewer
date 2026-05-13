@@ -117,8 +117,17 @@ class MainWindow(QMainWindow):
         self.document.set_study(result.studies[0])
 
     def _on_mesh_ready(self, mesh) -> None:
-        if self._preview_dialog is None:
-            self._preview_dialog = MeshPreviewDialog(parent=self)
+        # Build a fresh dialog each time. Reusing the dialog (and the
+        # QVTKRenderWindowInteractor inside it) led to a blank second preview
+        # and an unresponsive close button on some platforms.
+        prev_geometry = None
+        if self._preview_dialog is not None:
+            prev_geometry = self._preview_dialog.geometry()
+            self._preview_dialog.close()
+            self._preview_dialog.deleteLater()
+        self._preview_dialog = MeshPreviewDialog(parent=self)
+        if prev_geometry is not None:
+            self._preview_dialog.setGeometry(prev_geometry)
         self._preview_dialog.set_mesh(mesh)
         self._preview_dialog.show()
         self._preview_dialog.raise_()
