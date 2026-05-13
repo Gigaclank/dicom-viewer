@@ -140,6 +140,26 @@ def test_loader_progress_callback_is_invoked(tmp_path):
     assert all(b >= a for a, b in zip(fractions, fractions[1:]))
 
 
+def test_loader_should_cancel_raises_loader_cancelled(tmp_path):
+    from dicom_viewer.io.dicom_loader import LoaderCancelled
+
+    folder = make_synthetic_ct_series(tmp_path, shape=(8, 8, 8))
+    with pytest.raises(LoaderCancelled):
+        load_series_from_folder(folder, should_cancel=lambda: True)
+
+
+def test_loader_should_cancel_callback_failure_is_swallowed(tmp_path):
+    """If the user-provided should_cancel raises, the loader treats that as
+    'not cancelled' rather than failing the load."""
+    folder = make_synthetic_ct_series(tmp_path, shape=(3, 4, 4))
+
+    def boom() -> bool:
+        raise RuntimeError("intentional")
+
+    result = load_series_from_folder(folder, should_cancel=boom)
+    assert len(result.studies) == 1
+
+
 def test_loader_progress_callback_failure_does_not_break_load(tmp_path):
     folder = make_synthetic_ct_series(tmp_path, shape=(3, 4, 4))
 

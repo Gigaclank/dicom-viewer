@@ -23,6 +23,7 @@ from dicom_viewer.core.study import Study
 from dicom_viewer.core.volume import Orientation
 from dicom_viewer.io.config import save_last_project
 from dicom_viewer.io.dicom_loader import (
+    LoaderCancelled,
     LoaderError,
     LoadResult,
     load_series_from_file,
@@ -147,13 +148,14 @@ class MainWindow(QMainWindow):
         # Run the load in a worker thread with a modal progress dialog so the
         # UI stays responsive on big folders (500+ files = many seconds).
         worker = _FolderLoadWorker(Path(folder))
-        dialog = QProgressDialog("Scanning folder…", None, 0, 100, self)
+        dialog = QProgressDialog("Scanning folder…", "Cancel", 0, 100, self)
         dialog.setWindowTitle("Loading DICOM folder")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
-        # Suppress the cancel button — we don't currently support aborting
-        # mid-decode (the C extensions don't expose a cancel hook).
-        dialog.setCancelButton(None)  # type: ignore[arg-type]
+        # Cancel: ask the worker (politely) to stop. The worker's load loop
+        # checks isInterruptionRequested between files and between decoded
+        # slices, and short-circuits via LoaderCancelled.
+        dialog.canceled.connect(worker.requestInterruption)
 
         state: dict[str, object] = {}
 
@@ -169,13 +171,20 @@ class MainWindow(QMainWindow):
             state["error"] = msg
             dialog.close()
 
+        def on_cancelled() -> None:
+            state["cancelled"] = True
+            dialog.close()
+
         worker.progress.connect(on_progress)
         worker.finished_ok.connect(on_finished_ok)
         worker.failed.connect(on_failed)
+        worker.cancelled.connect(on_cancelled)
         worker.start()
         dialog.exec()
         worker.wait()
 
+        if state.get("cancelled"):
+            return False
         if "error" in state:
             QMessageBox.warning(self, "Load failed", str(state["error"]))
             return False
@@ -408,11 +417,16 @@ class MainWindow(QMainWindow):
 
 
 class _FolderLoadWorker(QThread):
-    """Runs load_series_from_folder off the UI thread, reports progress."""
+    """Runs load_series_from_folder off the UI thread, reports progress.
+
+    Cancellation: the UI calls requestInterruption() on the QThread; the
+    loader's should_cancel callback is hooked to isInterruptionRequested().
+    """
 
     progress = pyqtSignal(str, float)
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, folder: Path) -> None:
         super().__init__()
@@ -423,8 +437,11 @@ class _FolderLoadWorker(QThread):
             result = load_series_from_folder(
                 self._folder,
                 progress=lambda stage, frac: self.progress.emit(stage, frac),
+                should_cancel=self.isInterruptionRequested,
             )
             self.finished_ok.emit(result)
+        except LoaderCancelled:
+            self.cancelled.emit()
         except LoaderError as e:
             self.failed.emit(str(e))
         except Exception as e:  # noqa: BLE001

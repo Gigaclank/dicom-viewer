@@ -34,6 +34,10 @@ class LoaderError(Exception):
     """Raised when a folder yields no loadable DICOM series."""
 
 
+class LoaderCancelled(Exception):
+    """Raised when the loader is interrupted via the should_cancel callback."""
+
+
 @dataclass(frozen=True)
 class LoadResult:
     studies: list[Study]
@@ -45,6 +49,7 @@ def load_series_from_folder(
     folder: Path,
     *,
     progress: Optional[ProgressCallback] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> LoadResult:
     """Walk a folder, group DICOM files by SeriesInstanceUID, assemble each
     series into a Study.
@@ -61,6 +66,18 @@ def load_series_from_folder(
                 progress(stage, frac)
             except Exception:
                 pass
+
+    def check_cancel() -> None:
+        if should_cancel is not None:
+            try:
+                if should_cancel():
+                    raise LoaderCancelled()
+            except LoaderCancelled:
+                raise
+            except Exception:
+                # If the user-provided callback itself blows up, treat it as
+                # 'not cancelled' rather than failing the load.
+                return
 
     folder = Path(folder)
     if not folder.exists() or not folder.is_dir():
@@ -80,6 +97,8 @@ def load_series_from_folder(
     skipped_incomplete = 0
 
     for i, path in enumerate(all_files):
+        if i % 25 == 0:
+            check_cancel()
         try:
             ds = pydicom.dcmread(path, defer_size="1 KB", force=False)
         except (InvalidDicomError, OSError):
@@ -103,6 +122,7 @@ def load_series_from_folder(
     n_units = max(1, len(groups) + len(singletons))
     unit_idx = 0
     for uid, datasets in groups.items():
+        check_cancel()
         base = 0.10 + 0.85 * (unit_idx / n_units)
         slice_width = 0.85 / n_units
 
@@ -110,7 +130,11 @@ def load_series_from_folder(
             report(stage, _base + _w * frac)
 
         try:
-            study = _assemble_series(datasets, progress=per_series_progress)
+            study = _assemble_series(
+                datasets, progress=per_series_progress, should_cancel=should_cancel
+            )
+        except LoaderCancelled:
+            raise
         except _IncompleteSeries:
             skipped_incomplete += len(datasets)
         except Exception:
@@ -122,6 +146,7 @@ def load_series_from_folder(
         unit_idx += 1
 
     for ds in singletons:
+        check_cancel()
         base = 0.10 + 0.85 * (unit_idx / n_units)
         try:
             study = _assemble_single(ds)
@@ -254,6 +279,7 @@ def _assemble_series(
     datasets: list[pydicom.Dataset],
     *,
     progress: Optional[ProgressCallback] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Study:
     if not datasets:
         raise _IncompleteSeries()
@@ -300,10 +326,20 @@ def _assemble_series(
     def decode_one(i: int) -> tuple[int, np.ndarray]:
         return i, datasets[i].pixel_array
 
+    def _cancelled() -> bool:
+        if should_cancel is None:
+            return False
+        try:
+            return bool(should_cancel())
+        except Exception:
+            return False
+
     if n_workers <= 1:
         # Skip the executor overhead for tiny series — common in tests.
         completed = 0
         for i in range(n):
+            if _cancelled():
+                raise LoaderCancelled()
             _, pixels = decode_one(i)
             if modality == "CT":
                 out[i] = (pixels.astype(np.float32) * slope + intercept).astype(np.int16)
@@ -320,6 +356,12 @@ def _assemble_series(
             futures = {ex.submit(decode_one, i): i for i in range(n)}
             completed = 0
             for fut in as_completed(futures):
+                if _cancelled():
+                    # We can't interrupt in-flight decoders (no abort hook in
+                    # the C extensions), but stop processing any further.
+                    for f in futures:
+                        f.cancel()
+                    raise LoaderCancelled()
                 i, pixels = fut.result()
                 if modality == "CT":
                     out[i] = (pixels.astype(np.float32) * slope + intercept).astype(np.int16)

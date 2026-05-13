@@ -48,6 +48,13 @@ class VolumeRenderer:
         self._volume = volume
         if self._volume_actor is not None:
             self._renderer.RemoveVolume(self._volume_actor)
+            self._volume_actor = None
+        # Volume rendering only makes sense for >=2 slices. 2D modalities
+        # (mammograms, plain X-rays) have z=1 — show nothing in the 3D pane.
+        # The slice views still display them normally.
+        if volume.shape[0] < 2:
+            self._capture_home_camera()
+            return
         image = _volume_to_vtk_image(volume)
         mapper = vtk.vtkSmartVolumeMapper()
         mapper.SetInputData(image)
@@ -209,18 +216,46 @@ class VolumeRenderer:
         self.render()
 
 
+# Conservative upper bound for any 3D-texture axis. Most desktop GPUs allow
+# 2048 or more, but a tighter cap leaves headroom for VTK's internal
+# allocations and avoids surprises on older hardware. The slice views and
+# the STL export keep full resolution — only the 3D volume render is
+# downsampled. Hitting this limit isn't a quality problem for a quick visual
+# overview; the user still has the MPR panes for full detail.
+_MAX_3D_TEXTURE_DIM = 1024
+
+
 def _volume_to_vtk_image(volume: Volume) -> vtk.vtkImageData:
     arr = volume.array
     z, y, x = arr.shape
+    sz, sy, sx = volume.spacing_mm
+
+    # Downsample any axis that would exceed the GPU 3D-texture limit. Stride
+    # downsampling is cheap (just a view); the spacing scales by the same
+    # factor so the volume stays at the correct anatomical size in world space.
+    factors = (
+        max(1, _ceil_div(z, _MAX_3D_TEXTURE_DIM)),
+        max(1, _ceil_div(y, _MAX_3D_TEXTURE_DIM)),
+        max(1, _ceil_div(x, _MAX_3D_TEXTURE_DIM)),
+    )
+    if any(f > 1 for f in factors):
+        fz, fy, fx = factors
+        arr = arr[::fz, ::fy, ::fx]
+        sz, sy, sx = sz * fz, sy * fy, sx * fx
+        z, y, x = arr.shape
+
     image = vtk.vtkImageData()
     image.SetDimensions(x, y, z)
-    sz, sy, sx = volume.spacing_mm
     image.SetSpacing(sx, sy, sz)
     image.SetOrigin(0, 0, 0)
     vtk_type = vtk.VTK_SHORT if arr.dtype == np.int16 else vtk.VTK_FLOAT
     flat = numpy_support.numpy_to_vtk(arr.ravel(order="C"), deep=True, array_type=vtk_type)
     image.GetPointData().SetScalars(flat)
     return image
+
+
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
 
 
 def _mask_to_vtk_image(mask: np.ndarray, spacing_mm: tuple[float, float, float]) -> vtk.vtkImageData:

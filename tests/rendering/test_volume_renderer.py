@@ -66,6 +66,17 @@ def test_volume_renderer_reset_view_without_volume_does_not_crash():
     VolumeRenderer().reset_view()  # no scene yet — must not raise
 
 
+def test_set_volume_skips_3d_render_for_2d_image():
+    """Mammograms and X-rays have z=1 and would blow VTK's 3D-texture limit;
+    the volume renderer must skip adding the volume actor and leave the
+    scene empty."""
+    arr = np.zeros((1, 8, 8), dtype=np.int16)
+    vol = Volume(array=arr, spacing_mm=(1.0, 1.0, 1.0), modality="MG")
+    r = VolumeRenderer()
+    r.set_volume(vol)
+    assert r._volume_actor is None
+
+
 def test_loading_a_new_volume_uses_default_orientation_not_inherited_rotation():
     """Each new volume must start from the same anatomical-anterior pose; the
     rotation the user left on the previous volume must not bleed into the

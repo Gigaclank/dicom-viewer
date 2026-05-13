@@ -55,7 +55,15 @@ class Volume3DView(QWidget):
     def set_volume(self, volume: Volume) -> None:
         self._volume = volume
         self._renderer.set_volume(volume)
-        self._label.setText(f"3D — {volume.modality}  {volume.shape[0]}×{volume.shape[1]}×{volume.shape[2]}")
+        if volume.shape[0] < 2:
+            self._label.setText(
+                f"3D — {volume.modality}  {volume.shape[0]}×{volume.shape[1]}×{volume.shape[2]}  "
+                f"(2D image — no 3D render)"
+            )
+        else:
+            self._label.setText(
+                f"3D — {volume.modality}  {volume.shape[0]}×{volume.shape[1]}×{volume.shape[2]}"
+            )
         self._render_if_live()
 
     def set_overlay_mask(self, mask: np.ndarray | None) -> None:
