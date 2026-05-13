@@ -1,6 +1,7 @@
 """Segmentation methods. Each public function returns a Segmentation."""
 from dicom_viewer.core.segmentation.base import Segmentation
 from dicom_viewer.core.segmentation.morphology import keep_largest_component, smooth_mask
+from dicom_viewer.core.segmentation.region_grow import region_grow
 from dicom_viewer.core.segmentation.threshold import threshold
 
 __all__ = [
@@ -8,4 +9,5 @@ __all__ = [
     "threshold",
     "keep_largest_component",
     "smooth_mask",
+    "region_grow",
 ]
