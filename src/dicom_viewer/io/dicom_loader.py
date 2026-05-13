@@ -64,6 +64,11 @@ def load_series_from_folder(folder: Path) -> LoadResult:
         except _IncompleteSeries:
             skipped_incomplete += len(datasets)
             continue
+        except Exception:
+            # One pathological series (decoding failure, mismatched frames,
+            # etc.) must not abort loading the rest of the folder.
+            skipped_incomplete += len(datasets)
+            continue
         studies.append(study)
 
     if not studies:
@@ -158,18 +163,35 @@ class _IncompleteSeries(Exception):
     pass
 
 
+def _safe_float(value: object, default: float) -> float:
+    """Coerce a pydicom tag value to float, falling back when it's None/empty/garbage."""
+    if value is None:
+        return default
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def _assemble_series(datasets: list[pydicom.Dataset]) -> Study:
     if not datasets:
         raise _IncompleteSeries()
 
     sample = datasets[0]
-    iop = [float(v) for v in sample.ImageOrientationPatient]
+    iop_raw = getattr(sample, "ImageOrientationPatient", None)
+    if iop_raw is None or len(iop_raw) != 6:
+        iop = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    else:
+        iop = [_safe_float(v, 0.0) for v in iop_raw]
     row_cosine = np.array(iop[0:3], dtype=np.float64)
     col_cosine = np.array(iop[3:6], dtype=np.float64)
     slice_normal = np.cross(row_cosine, col_cosine)
 
     def project(ds: pydicom.Dataset) -> float:
-        ipp = np.array([float(v) for v in ds.ImagePositionPatient], dtype=np.float64)
+        ipp_raw = getattr(ds, "ImagePositionPatient", None)
+        if ipp_raw is None or len(ipp_raw) != 3:
+            return 0.0
+        ipp = np.array([_safe_float(v, 0.0) for v in ipp_raw], dtype=np.float64)
         return float(np.dot(ipp, slice_normal))
 
     datasets.sort(key=project)
@@ -177,11 +199,11 @@ def _assemble_series(datasets: list[pydicom.Dataset]) -> Study:
     rows, cols = int(sample.Rows), int(sample.Columns)
     n = len(datasets)
 
-    modality = str(sample.Modality)
+    modality = str(getattr(sample, "Modality", "OT"))
     if modality == "CT":
         out = np.empty((n, rows, cols), dtype=np.int16)
-        slope = float(getattr(sample, "RescaleSlope", 1.0))
-        intercept = float(getattr(sample, "RescaleIntercept", 0.0))
+        slope = _safe_float(getattr(sample, "RescaleSlope", None), 1.0)
+        intercept = _safe_float(getattr(sample, "RescaleIntercept", None), 0.0)
     else:
         out = np.empty((n, rows, cols), dtype=np.float32)
         slope = 1.0
@@ -198,19 +220,29 @@ def _assemble_series(datasets: list[pydicom.Dataset]) -> Study:
     # Spacing: recompute z from projected positions, y/x from PixelSpacing.
     if n >= 2:
         z_spacing = abs(project(datasets[1]) - project(datasets[0]))
+        if z_spacing == 0.0:
+            z_spacing = _safe_float(getattr(sample, "SliceThickness", None), 1.0)
     else:
-        z_spacing = float(getattr(sample, "SliceThickness", 1.0))
-    py, px = (float(v) for v in sample.PixelSpacing)
+        z_spacing = _safe_float(getattr(sample, "SliceThickness", None), 1.0)
+    if z_spacing <= 0.0:
+        z_spacing = 1.0
+
+    px_spacing = getattr(sample, "PixelSpacing", None)
+    if px_spacing is not None and len(px_spacing) == 2:
+        py = _safe_float(px_spacing[0], 1.0)
+        px = _safe_float(px_spacing[1], 1.0)
+    else:
+        py, px = 1.0, 1.0
     spacing = (z_spacing, py, px)
 
     volume = Volume(array=out, spacing_mm=spacing, modality=modality)
 
     return Study(
         volume=volume,
-        patient_id=str(getattr(sample, "PatientID", "")),
-        patient_name=str(getattr(sample, "PatientName", "")),
-        study_uid=str(sample.StudyInstanceUID),
-        series_uid=str(sample.SeriesInstanceUID),
-        series_description=str(getattr(sample, "SeriesDescription", "")),
+        patient_id=str(getattr(sample, "PatientID", "") or ""),
+        patient_name=str(getattr(sample, "PatientName", "") or ""),
+        study_uid=str(getattr(sample, "StudyInstanceUID", "") or ""),
+        series_uid=str(getattr(sample, "SeriesInstanceUID", "") or ""),
+        series_description=str(getattr(sample, "SeriesDescription", "") or ""),
         orientation_cosines=(iop[0], iop[1], iop[2], iop[3], iop[4], iop[5]),
     )

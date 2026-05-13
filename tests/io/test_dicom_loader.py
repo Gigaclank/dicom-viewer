@@ -105,3 +105,47 @@ def test_load_single_file_non_dicom_raises(tmp_path):
 def test_load_single_file_missing_raises(tmp_path):
     with pytest.raises(LoaderError):
         load_series_from_file(tmp_path / "nope.dcm")
+
+
+def test_load_tolerates_none_slice_thickness(tmp_path):
+    """Regression: pydicom returns None for tags that exist but are empty.
+    float(None) blew up the loader on the pydicom test corpus."""
+    import pydicom
+
+    folder = make_synthetic_ct_series(tmp_path, shape=(3, 4, 4), spacing=(2.0, 1.0, 1.0))
+    # Rewrite one slice with SliceThickness explicitly None — pydicom serializes
+    # this as an empty-value tag, which deserializes back to None.
+    one = next(folder.glob("*.dcm"))
+    ds = pydicom.dcmread(one)
+    ds.SliceThickness = None
+    ds.save_as(one)
+
+    result = load_series_from_folder(folder)
+    assert len(result.studies) == 1
+    # Z spacing should still be derived from ImagePositionPatient (2 mm).
+    assert result.studies[0].spacing_mm[0] == pytest.approx(2.0)
+
+
+def test_load_folder_skips_a_broken_series_keeps_good_ones(tmp_path):
+    """A pathological series shouldn't take down the whole folder load."""
+    import pydicom
+
+    good = make_synthetic_ct_series(tmp_path / "good_subdir", shape=(3, 4, 4))
+    bad = make_synthetic_mr_series(tmp_path / "bad_subdir", shape=(3, 4, 4))
+    # Move both into one combined folder so rglob picks them up together.
+    combined = tmp_path / "combined"
+    combined.mkdir()
+    for src in good.glob("*.dcm"):
+        src.rename(combined / src.name)
+    for src in bad.glob("*.dcm"):
+        new = combined / f"bad_{src.name}"
+        src.rename(new)
+        # Corrupt the file's Rows tag so assembly will fail.
+        ds = pydicom.dcmread(new)
+        ds.Rows = None
+        ds.save_as(new)
+
+    result = load_series_from_folder(combined)
+    assert len(result.studies) == 1
+    assert result.studies[0].modality == "CT"
+    assert result.skipped_incomplete >= 3
