@@ -24,6 +24,7 @@ from dicom_viewer.core.mesh_export import (
     export_stl,
     generate_mesh,
 )
+from dicom_viewer.io.nifti import save_segmentation_to_nifti
 from dicom_viewer.io.project import ExportSettings
 from dicom_viewer.ui.widgets.labeled_slider import LabeledFloatSlider, LabeledSlider
 
@@ -98,6 +99,14 @@ class ExportPanel(QWidget):
         self.export_button.clicked.connect(self._on_export_clicked)
         self.export_button.setEnabled(False)
 
+        self.export_nifti_button = QPushButton("Export mask as NIfTI…")
+        self.export_nifti_button.setToolTip(
+            "Save the current segmentation mask as a NIfTI (.nii.gz) file. "
+            "Voxel grid matches the source volume."
+        )
+        self.export_nifti_button.clicked.connect(self._on_export_nifti_clicked)
+        self.export_nifti_button.setEnabled(False)
+
         self._status = QLabel("")
         # Word-wrap so a long path or message doesn't widen the dock column.
         self._status.setWordWrap(True)
@@ -110,6 +119,7 @@ class ExportPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(self.export_button)
+        layout.addWidget(self.export_nifti_button)
         layout.addWidget(self._status)
 
         document.subscribe(self._on_doc_event)
@@ -122,7 +132,32 @@ class ExportPanel(QWidget):
             self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
-        self.export_button.setEnabled(self._document.segmentation is not None)
+        has_seg = self._document.segmentation is not None
+        self.export_button.setEnabled(has_seg)
+        self.export_nifti_button.setEnabled(has_seg)
+
+    def _on_export_nifti_clicked(self) -> None:
+        volume = self._document.volume
+        seg = self._document.segmentation
+        if volume is None or seg is None:
+            return
+        suggested = self._suggested_filename().rsplit(".", 1)[0] + ".nii.gz"
+        out_str, _ = QFileDialog.getSaveFileName(
+            self, "Export Mask as NIfTI", suggested, "NIfTI files (*.nii.gz *.nii)"
+        )
+        if not out_str:
+            return
+        out = Path(out_str)
+        if not (out.name.endswith(".nii") or out.name.endswith(".nii.gz")):
+            out = out.with_name(out.name + ".nii.gz")
+        try:
+            save_segmentation_to_nifti(seg, volume, out)
+        except Exception as e:  # noqa: BLE001
+            self._status.setText(f"NIfTI export failed: {e}")
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        self._status.setText(f"Wrote {out.name}")
+        self._status.setToolTip(str(out))
 
     # --- actions ---
     def _on_export_clicked(self) -> None:

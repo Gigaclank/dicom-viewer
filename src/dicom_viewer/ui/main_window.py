@@ -220,9 +220,12 @@ class MainWindow(QMainWindow):
     def _on_open_file(self) -> None:
         path_str, _ = QFileDialog.getOpenFileName(
             self,
-            "Open DICOM File",
+            "Open DICOM or NIfTI File",
             "",
-            "DICOM files (*.dcm *.dicom *.DCM *.DICOM);;All files (*)",
+            "Volume files (*.dcm *.dicom *.DCM *.DICOM *.nii *.nii.gz);;"
+            "DICOM (*.dcm *.dicom *.DCM *.DICOM);;"
+            "NIfTI (*.nii *.nii.gz);;"
+            "All files (*)",
         )
         if not path_str:
             return

@@ -1,12 +1,16 @@
 """Segmentation panel — threshold + region-grow methods with live preview."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -16,6 +20,7 @@ from dicom_viewer.core.document import Document
 from dicom_viewer.core.segmentation.morphology import keep_largest_component, smooth_mask
 from dicom_viewer.core.segmentation.region_grow import region_grow
 from dicom_viewer.core.segmentation.threshold import threshold
+from dicom_viewer.io.nifti import load_segmentation_from_nifti
 from dicom_viewer.io.project import SegmentationSettings
 from dicom_viewer.ui.widgets.labeled_slider import LabeledSlider
 
@@ -61,6 +66,12 @@ class SegmentationPanel(QWidget):
         self.apply_button.clicked.connect(self._on_apply)
         self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(lambda: document.set_segmentation(None))
+        self.import_button = QPushButton("Import mask…")
+        self.import_button.setToolTip(
+            "Load a segmentation mask from a NIfTI (.nii / .nii.gz) file. "
+            "Shape must match the current volume."
+        )
+        self.import_button.clicked.connect(self._on_import_clicked)
 
         self._status = QLabel("No segmentation")
         self._status.setWordWrap(True)
@@ -81,6 +92,7 @@ class SegmentationPanel(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.apply_button)
         buttons.addWidget(self.clear_button)
+        buttons.addWidget(self.import_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -104,6 +116,26 @@ class SegmentationPanel(QWidget):
     def _on_method_changed(self, _text: str) -> None:
         # Method switch is also a moment to refresh the live preview if eligible.
         self._on_threshold_changed()
+
+    def _on_import_clicked(self) -> None:
+        volume = self._document.volume
+        if volume is None:
+            QMessageBox.warning(self, "Import failed", "Load a volume first.")
+            return
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import segmentation mask (NIfTI)",
+            "",
+            "NIfTI files (*.nii *.nii.gz);;All files (*)",
+        )
+        if not path_str:
+            return
+        try:
+            seg = load_segmentation_from_nifti(Path(path_str), volume)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Import failed", f"{type(e).__name__}: {e}")
+            return
+        self._document.set_segmentation(seg)
 
     def _on_apply(self) -> None:
         self._apply_now()

@@ -8,6 +8,7 @@ dependencies = [
     "pylibjpeg>=2.0",
     "pylibjpeg-libjpeg>=2.1",
     "pylibjpeg-openjpeg>=2.2",
+    "nibabel>=5.0",
     "numpy>=1.26",
     "scipy>=1.11",
     "SimpleITK>=2.3",

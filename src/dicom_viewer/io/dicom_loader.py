@@ -173,15 +173,31 @@ def load_series_from_folder(
 
 
 def load_series_from_file(path: Path) -> LoadResult:
-    """Load a single DICOM file as a one-slice (or multi-frame) study.
+    """Load a single DICOM or NIfTI file as a one-slice (or 3D) study.
 
-    More permissive than folder loading: tolerates missing ImageOrientationPatient,
-    PixelSpacing, and SliceThickness by substituting standard-axial defaults.
-    Use this for one-off `.dcm`/`.dicom` files that lack full geometry headers.
+    Dispatches on extension: .nii / .nii.gz go through the NIfTI loader,
+    everything else is treated as DICOM.
+
+    The DICOM path is more permissive than folder loading: tolerates missing
+    ImageOrientationPatient, PixelSpacing, and SliceThickness by substituting
+    standard-axial defaults. Use this for one-off `.dcm`/`.dicom` files that
+    lack full geometry headers.
     """
     path = Path(path)
     if not path.is_file():
         raise LoaderError(f"not a file: {path}")
+
+    # Lazy-imported so a missing nibabel only matters when the user actually
+    # opens a NIfTI file. (It IS in the project deps; this is defence in depth.)
+    from dicom_viewer.io.nifti import is_nifti_path, load_study_from_nifti
+
+    if is_nifti_path(path):
+        try:
+            study = load_study_from_nifti(path)
+        except Exception as e:
+            raise LoaderError(f"could not load NIfTI {path}: {e}") from e
+        return LoadResult(studies=[study], skipped_non_dicom=0, skipped_incomplete=0)
+
     try:
         ds = pydicom.dcmread(path, force=False)
     except (InvalidDicomError, OSError) as e:
