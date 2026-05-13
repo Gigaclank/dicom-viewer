@@ -72,11 +72,9 @@ def _write_slice(
         ds.RescaleSlope = 1
         ds.RescaleIntercept = -1024
     ds.PixelData = pixels.astype(np.int16).tobytes()
-    ds.is_little_endian = True
-    ds.is_implicit_VR = False
 
     path = out_dir / f"slice_{index:04d}.dcm"
-    ds.save_as(path, write_like_original=False)
+    ds.save_as(path, enforce_file_format=True)
     return path
 
 
