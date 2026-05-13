@@ -17,6 +17,7 @@ from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -36,10 +37,14 @@ from dicom_viewer.rendering.mesh_preview import MeshPreview
 
 
 class _PreviewWorker(QThread):
-    """Runs generate_mesh off the UI thread and reports a Mesh or an error."""
+    """Runs generate_mesh off the UI thread and reports a Mesh or an error.
+
+    Emits progress(stage_name, fraction) for the embedded progress bar.
+    """
 
     finished_ok = pyqtSignal(object)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str, float)
 
     def __init__(
         self,
@@ -57,7 +62,12 @@ class _PreviewWorker(QThread):
     def run(self) -> None:
         try:
             mesh = generate_mesh(
-                self._volume, self._segmentation, self._region, self._options
+                self._volume,
+                self._segmentation,
+                self._region,
+                self._options,
+                preview_mode=True,
+                progress=lambda stage, frac: self.progress.emit(stage, frac),
             )
             self.finished_ok.emit(mesh)
         except EmptyMeshError as e:
@@ -103,11 +113,19 @@ class MeshPreviewView(QWidget):
         self.reset_button.setToolTip("Re-fit the camera to the current mesh")
         self.reset_button.clicked.connect(self._on_reset_clicked)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setMaximumHeight(14)
+        self.progress_bar.setTextVisible(True)
+
         bottom = QHBoxLayout()
         bottom.addWidget(self._info_label, stretch=1)
         bottom.addWidget(self.reset_button)
         layout = QVBoxLayout(self)
         layout.addWidget(self._vtk_widget, stretch=1)
+        layout.addWidget(self.progress_bar)
         layout.addLayout(bottom)
 
         self._debounce = QTimer(self)
@@ -158,24 +176,35 @@ class MeshPreviewView(QWidget):
         options = self._export_panel.get_export_options()
         self._info_label.setText("Computing mesh…")
         self._refresh_pending = False
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Starting… %p%")
+        self.progress_bar.setVisible(True)
         self._worker = _PreviewWorker(volume, seg, region, options)
+        self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_mesh_ready)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished.connect(self._on_worker_done)
         self._worker.start()
+
+    def _on_progress(self, stage: str, fraction: float) -> None:
+        self.progress_bar.setFormat(f"{stage} — %p%")
+        self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 100))
 
     def _on_mesh_ready(self, mesh: Mesh) -> None:
         self._preview.set_mesh(mesh)
         (lo_z, lo_y, lo_x), (hi_z, hi_y, hi_x) = mesh.bounds_mm
         self._info_label.setText(
             f"{mesh.triangle_count:,} triangles • "
-            f"{hi_x - lo_x:.1f} × {hi_y - lo_y:.1f} × {hi_z - lo_z:.1f} mm"
+            f"{hi_x - lo_x:.1f} × {hi_y - lo_y:.1f} × {hi_z - lo_z:.1f} mm "
+            f"(preview — export uses full resolution)"
         )
+        self.progress_bar.setVisible(False)
         self._render_if_live()
 
     def _on_failed(self, msg: str) -> None:
         self._info_label.setText(f"Mesh error: {msg}")
         self._preview.set_mesh(None)
+        self.progress_bar.setVisible(False)
         self._render_if_live()
 
     def _on_worker_done(self) -> None:
