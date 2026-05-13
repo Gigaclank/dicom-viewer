@@ -23,6 +23,14 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+# MedSAM-based interactive segmentation. Heavy (torch is ~700MB-2GB depending
+# on CUDA); install only when you want the AI segmenter. The model weights
+# (~360MB) auto-download from HuggingFace on first use.
+medsam = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "pillow>=10.0",
+]
 
 [project.scripts]
 dicom-viewer = "dicom_viewer.app:main"

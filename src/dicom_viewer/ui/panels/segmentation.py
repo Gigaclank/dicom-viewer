@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -11,15 +12,18 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from dicom_viewer.core.document import Document
+from dicom_viewer.core.region import Region
 from dicom_viewer.core.segmentation.morphology import keep_largest_component, smooth_mask
 from dicom_viewer.core.segmentation.region_grow import region_grow
 from dicom_viewer.core.segmentation.threshold import threshold
+from dicom_viewer.core.volume import Volume
 from dicom_viewer.io.nifti import load_segmentation_from_nifti
 from dicom_viewer.io.project import SegmentationSettings
 from dicom_viewer.ui.widgets.labeled_slider import LabeledSlider
@@ -72,6 +76,13 @@ class SegmentationPanel(QWidget):
             "Shape must match the current volume."
         )
         self.import_button.clicked.connect(self._on_import_clicked)
+        self.medsam_button = QPushButton("Segment with MedSAM")
+        self.medsam_button.setToolTip(
+            "Run MedSAM (SAM-based medical segmenter) over the z-slices of "
+            "the active region. The xy bounding box of the region is used as "
+            "the prompt. Requires the `medsam` extra: pip install 'dicom-viewer[medsam]'."
+        )
+        self.medsam_button.clicked.connect(self._on_medsam_clicked)
 
         self._status = QLabel("No segmentation")
         self._status.setWordWrap(True)
@@ -93,6 +104,7 @@ class SegmentationPanel(QWidget):
         buttons.addWidget(self.apply_button)
         buttons.addWidget(self.clear_button)
         buttons.addWidget(self.import_button)
+        buttons.addWidget(self.medsam_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -136,6 +148,72 @@ class SegmentationPanel(QWidget):
             QMessageBox.warning(self, "Import failed", f"{type(e).__name__}: {e}")
             return
         self._document.set_segmentation(seg)
+
+    def _on_medsam_clicked(self) -> None:
+        # Late import so the segmentation panel doesn't pull torch into the
+        # base install just by being imported.
+        from dicom_viewer.core.segmentation.medsam import MedSAMSegmenter
+
+        if not MedSAMSegmenter.is_available():
+            QMessageBox.warning(
+                self,
+                "MedSAM not available",
+                "MedSAM requires extra dependencies.\n\n"
+                "Install with:\n    pip install 'dicom-viewer[medsam]'\n\n"
+                "First run will download ~360MB of model weights from HuggingFace.",
+            )
+            return
+
+        volume = self._document.volume
+        region = self._document.region
+        if volume is None:
+            QMessageBox.warning(self, "MedSAM", "Load a volume first.")
+            return
+        if region is None or region.is_empty:
+            QMessageBox.warning(
+                self,
+                "MedSAM",
+                "Set an active region first — its xy bounding box is the prompt "
+                "and its z range selects which slices to segment.",
+            )
+            return
+
+        worker = _MedSAMWorker(volume, region)
+        dialog = QProgressDialog("Loading MedSAM model…", "Cancel", 0, 100, self)
+        dialog.setWindowTitle("MedSAM segmentation")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(worker.requestInterruption)
+
+        state: dict[str, object] = {}
+
+        def on_progress(stage: str, fraction: float) -> None:
+            dialog.setLabelText(stage)
+            dialog.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+
+        def on_done(seg) -> None:
+            state["result"] = seg
+            dialog.close()
+
+        def on_failed(msg: str) -> None:
+            state["error"] = msg
+            dialog.close()
+
+        worker.progress.connect(on_progress)
+        worker.finished_ok.connect(on_done)
+        worker.failed.connect(on_failed)
+        worker.start()
+        dialog.exec()
+        worker.wait()
+
+        if "error" in state:
+            QMessageBox.warning(self, "MedSAM failed", str(state["error"]))
+            return
+        seg = state.get("result")
+        if seg is not None:
+            self._document.set_segmentation(seg)
 
     def _on_apply(self) -> None:
         self._apply_now()
@@ -245,3 +323,31 @@ class SegmentationPanel(QWidget):
             self.seed_x.setValue(sx // 2)
         finally:
             self._suppress_live = False
+
+
+class _MedSAMWorker(QThread):
+    """Runs MedSAM segmentation off the UI thread with progress + cancel."""
+
+    progress = pyqtSignal(str, float)
+    finished_ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, volume: Volume, region: Region) -> None:
+        super().__init__()
+        self._volume = volume
+        self._region = region
+
+    def run(self) -> None:
+        try:
+            from dicom_viewer.core.segmentation.medsam import MedSAMSegmenter
+
+            segmenter = MedSAMSegmenter()
+            seg = segmenter.segment_volume_z(
+                self._volume,
+                self._region,
+                progress=lambda s, f: self.progress.emit(s, f),
+                should_cancel=self.isInterruptionRequested,
+            )
+            self.finished_ok.emit(seg)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(f"{type(e).__name__}: {e}")
