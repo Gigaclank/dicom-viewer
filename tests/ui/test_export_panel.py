@@ -49,3 +49,44 @@ def test_export_writes_stl_file(qtbot, tmp_path):
     panel.run_export(out)  # synchronous helper used by the button slot
     assert out.exists()
     assert out.stat().st_size > 84
+
+
+def test_preview_button_disabled_without_segmentation(qtbot):
+    doc = Document()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    assert not panel.preview_button.isEnabled()
+
+
+def test_preview_emits_mesh_ready_signal(qtbot):
+    doc = _doc_with_segmentation()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    received: list[object] = []
+    panel.mesh_ready.connect(received.append)
+    panel.preview_button.click()
+    assert len(received) == 1
+    mesh = received[0]
+    assert mesh.triangle_count > 0
+
+
+def test_preview_does_not_write_file(qtbot, tmp_path):
+    doc = _doc_with_segmentation()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    # Cwd is unaffected by preview — no STL written anywhere.
+    panel.preview_button.click()
+    assert list(tmp_path.glob("*.stl")) == []
+
+
+def test_status_label_shows_filename_not_full_path(qtbot, tmp_path):
+    doc = _doc_with_segmentation()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    out = tmp_path / "deeply" / "nested" / "directory" / "result.stl"
+    out.parent.mkdir(parents=True)
+    panel.run_export(out)
+    text = panel._status.text()
+    assert "result.stl" in text
+    assert str(out.parent) not in text  # full path NOT in label
+    assert panel._status.toolTip() == str(out)  # full path on hover instead

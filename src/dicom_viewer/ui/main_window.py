@@ -26,6 +26,7 @@ from dicom_viewer.io.dicom_loader import (
 from dicom_viewer.ui.panels.export import ExportPanel
 from dicom_viewer.ui.panels.segmentation import SegmentationPanel
 from dicom_viewer.ui.panels.windowing import WindowingPanel
+from dicom_viewer.ui.widgets.mesh_preview_dialog import MeshPreviewDialog
 from dicom_viewer.ui.widgets.slice_view import SliceView
 from dicom_viewer.ui.widgets.volume3d_view import Volume3DView
 
@@ -51,10 +52,14 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.volume3d, 1, 1)
         self.setCentralWidget(grid_host)
 
+        self.export_panel = ExportPanel(self.document)
+        self._preview_dialog: MeshPreviewDialog | None = None
+        self.export_panel.mesh_ready.connect(self._on_mesh_ready)
+
         tabs = QTabWidget()
         tabs.addTab(WindowingPanel(self.document), "Windowing")
         tabs.addTab(SegmentationPanel(self.document), "Segmentation")
-        tabs.addTab(ExportPanel(self.document), "Export")
+        tabs.addTab(self.export_panel, "Export")
         dock = QDockWidget("Tools", self)
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
@@ -113,6 +118,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Load failed", str(e))
             return
         self.document.set_study(result.studies[0])
+
+    def _on_mesh_ready(self, mesh) -> None:
+        if self._preview_dialog is None:
+            self._preview_dialog = MeshPreviewDialog(parent=self)
+        self._preview_dialog.set_mesh(mesh)
+        self._preview_dialog.show()
+        self._preview_dialog.raise_()
+        self._preview_dialog.activateWindow()
 
     def _on_reset_views(self) -> None:
         self.axial.reset_view()
