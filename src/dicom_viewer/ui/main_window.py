@@ -27,6 +27,7 @@ from dicom_viewer.ui.panels.export import ExportPanel
 from dicom_viewer.ui.panels.segmentation import SegmentationPanel
 from dicom_viewer.ui.panels.windowing import WindowingPanel
 from dicom_viewer.ui.widgets.slice_view import SliceView
+from dicom_viewer.ui.widgets.volume3d_view import Volume3DView
 
 
 class MainWindow(QMainWindow):
@@ -40,17 +41,14 @@ class MainWindow(QMainWindow):
         self.axial = SliceView(Orientation.AXIAL)
         self.coronal = SliceView(Orientation.CORONAL)
         self.sagittal = SliceView(Orientation.SAGITTAL)
-        # The 3D view is a placeholder QWidget; full VolumeRenderer is wired in via the
-        # rendering layer in a later iteration. For groundwork, the four-pane layout
-        # uses the three MPRs plus a labelled placeholder pane.
-        self.placeholder_3d = QWidget()
+        self.volume3d = Volume3DView()
 
         grid_host = QWidget()
         grid = QGridLayout(grid_host)
         grid.addWidget(self.axial, 0, 0)
         grid.addWidget(self.coronal, 0, 1)
         grid.addWidget(self.sagittal, 1, 0)
-        grid.addWidget(self.placeholder_3d, 1, 1)
+        grid.addWidget(self.volume3d, 1, 1)
         self.setCentralWidget(grid_host)
 
         tabs = QTabWidget()
@@ -120,6 +118,7 @@ class MainWindow(QMainWindow):
         self.axial.reset_view()
         self.coronal.reset_view()
         self.sagittal.reset_view()
+        self.volume3d.reset_view()
 
     def _on_doc_event(self, kind: str) -> None:
         volume = self.document.volume
@@ -129,6 +128,7 @@ class MainWindow(QMainWindow):
             self.axial.set_volume(volume)
             self.coronal.set_volume(volume)
             self.sagittal.set_volume(volume)
+            self.volume3d.set_volume(volume)
         if kind in ("study", "windowing"):
             w = self.document.windowing
             self.axial.set_windowing(w.center, w.width)
@@ -139,3 +139,6 @@ class MainWindow(QMainWindow):
             self.axial.set_overlay_mask(mask)
             self.coronal.set_overlay_mask(mask)
             self.sagittal.set_overlay_mask(mask)
+            self.volume3d.set_overlay_mask(mask)
+        if kind in ("study", "region"):
+            self.volume3d.set_region(self.document.region)
