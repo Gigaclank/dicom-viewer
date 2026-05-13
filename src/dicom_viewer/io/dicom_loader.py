@@ -1,8 +1,10 @@
-"""DICOM folder loader.
+"""DICOM loader — folder (multi-slice series) and single-file entry points.
 
-Walks a directory tree, groups DICOM files by SeriesInstanceUID, sorts each
-series by ImagePositionPatient projected onto the slice-normal axis, and
-returns a list of fully assembled `Study` objects.
+`load_series_from_folder` walks a directory tree, groups files by
+SeriesInstanceUID, sorts each series by ImagePositionPatient projected onto
+the slice-normal axis. `load_series_from_file` reads a single DICOM file as
+a one-slice study (or multi-frame volume), tolerating missing geometry tags
+that one-off `.dcm` files often skip.
 """
 from __future__ import annotations
 
@@ -75,6 +77,80 @@ def load_series_from_folder(folder: Path) -> LoadResult:
         studies=studies,
         skipped_non_dicom=skipped_non_dicom,
         skipped_incomplete=skipped_incomplete,
+    )
+
+
+def load_series_from_file(path: Path) -> LoadResult:
+    """Load a single DICOM file as a one-slice (or multi-frame) study.
+
+    More permissive than folder loading: tolerates missing ImageOrientationPatient,
+    PixelSpacing, and SliceThickness by substituting standard-axial defaults.
+    Use this for one-off `.dcm`/`.dicom` files that lack full geometry headers.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise LoaderError(f"not a file: {path}")
+    try:
+        ds = pydicom.dcmread(path, force=False)
+    except (InvalidDicomError, OSError) as e:
+        raise LoaderError(f"not a valid DICOM file: {path} ({e})") from e
+    if not hasattr(ds, "PixelData"):
+        raise LoaderError(f"no PixelData in {path}")
+    try:
+        study = _assemble_single(ds)
+    except Exception as e:
+        raise LoaderError(f"could not assemble study from {path}: {e}") from e
+    return LoadResult(studies=[study], skipped_non_dicom=0, skipped_incomplete=0)
+
+
+def _assemble_single(ds: pydicom.Dataset) -> Study:
+    """Build a Study from one dataset, falling back to defaults for missing geometry."""
+    pixels = ds.pixel_array
+    modality = str(getattr(ds, "Modality", "OT"))
+
+    if modality == "CT":
+        slope = float(getattr(ds, "RescaleSlope", 1.0))
+        intercept = float(getattr(ds, "RescaleIntercept", 0.0))
+        scaled = (pixels.astype(np.float32) * slope + intercept).astype(np.int16)
+    else:
+        scaled = pixels.astype(np.float32)
+
+    # Normalize to (z, y, x). 2D single slice -> (1, y, x); 3D multi-frame already OK.
+    if scaled.ndim == 2:
+        scaled = scaled[np.newaxis, :, :]
+    elif scaled.ndim != 3:
+        raise ValueError(f"unsupported pixel array shape {scaled.shape}")
+
+    iop_default = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    iop_raw = getattr(ds, "ImageOrientationPatient", None)
+    if iop_raw is not None and len(iop_raw) == 6:
+        iop = tuple(float(v) for v in iop_raw)
+    else:
+        iop = iop_default
+
+    pixel_spacing = getattr(ds, "PixelSpacing", None)
+    if pixel_spacing is not None and len(pixel_spacing) == 2:
+        py, px = float(pixel_spacing[0]), float(pixel_spacing[1])
+    else:
+        py, px = 1.0, 1.0
+
+    z_spacing = float(getattr(ds, "SliceThickness", 1.0) or 1.0)
+    if z_spacing <= 0:
+        z_spacing = 1.0
+
+    volume = Volume(
+        array=np.ascontiguousarray(scaled),
+        spacing_mm=(z_spacing, py, px),
+        modality=modality,
+    )
+    return Study(
+        volume=volume,
+        patient_id=str(getattr(ds, "PatientID", "")),
+        patient_name=str(getattr(ds, "PatientName", "")),
+        study_uid=str(getattr(ds, "StudyInstanceUID", "")),
+        series_uid=str(getattr(ds, "SeriesInstanceUID", "")),
+        series_description=str(getattr(ds, "SeriesDescription", "")),
+        orientation_cosines=iop,
     )
 
 

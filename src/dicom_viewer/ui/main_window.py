@@ -18,7 +18,11 @@ from PyQt6.QtWidgets import (
 
 from dicom_viewer.core.document import Document
 from dicom_viewer.core.volume import Orientation
-from dicom_viewer.io.dicom_loader import LoaderError, load_series_from_folder
+from dicom_viewer.io.dicom_loader import (
+    LoaderError,
+    load_series_from_file,
+    load_series_from_folder,
+)
 from dicom_viewer.ui.panels.export import ExportPanel
 from dicom_viewer.ui.panels.segmentation import SegmentationPanel
 from dicom_viewer.ui.panels.windowing import WindowingPanel
@@ -57,11 +61,15 @@ class MainWindow(QMainWindow):
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
-        open_action = QAction("Open DICOM Folder…", self)
-        open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self._on_open_folder)
+        open_folder_action = QAction("Open DICOM Folder…", self)
+        open_folder_action.setShortcut("Ctrl+O")
+        open_folder_action.triggered.connect(self._on_open_folder)
+        open_file_action = QAction("Open DICOM File…", self)
+        open_file_action.setShortcut("Ctrl+Shift+O")
+        open_file_action.triggered.connect(self._on_open_file)
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction(open_action)
+        file_menu.addAction(open_folder_action)
+        file_menu.addAction(open_file_action)
 
         self.document.subscribe(self._on_doc_event)
 
@@ -85,6 +93,22 @@ class MainWindow(QMainWindow):
                 return
             chosen = result.studies[items.index(picked)]
         self.document.set_study(chosen)
+
+    def _on_open_file(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open DICOM File",
+            "",
+            "DICOM files (*.dcm *.dicom *.DCM *.DICOM);;All files (*)",
+        )
+        if not path_str:
+            return
+        try:
+            result = load_series_from_file(Path(path_str))
+        except LoaderError as e:
+            QMessageBox.warning(self, "Load failed", str(e))
+            return
+        self.document.set_study(result.studies[0])
 
     def _on_doc_event(self, kind: str) -> None:
         volume = self.document.volume

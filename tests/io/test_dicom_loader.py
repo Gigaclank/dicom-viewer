@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from dicom_viewer.io.dicom_loader import LoaderError, load_series_from_folder
+from dicom_viewer.io.dicom_loader import (
+    LoaderError,
+    load_series_from_file,
+    load_series_from_folder,
+)
 from tests.fixtures.make_synthetic_series import (
     make_synthetic_ct_series,
     make_synthetic_mr_series,
@@ -69,3 +73,35 @@ def test_slice_sorting_uses_image_position(tmp_path):
     study = result.studies[0]
     # Spacing recomputed from positions, not SliceThickness.
     assert study.spacing_mm[0] == pytest.approx(3.0)
+
+
+def test_load_single_ct_file(tmp_path):
+    folder = make_synthetic_ct_series(tmp_path, shape=(4, 6, 6))
+    one_file = next(folder.glob("*.dcm"))
+    result = load_series_from_file(one_file)
+    assert len(result.studies) == 1
+    study = result.studies[0]
+    assert study.modality == "CT"
+    assert study.volume.shape == (1, 6, 6)
+    assert study.volume.array.dtype == np.int16
+
+
+def test_load_single_mr_file(tmp_path):
+    folder = make_synthetic_mr_series(tmp_path, shape=(3, 8, 8))
+    one_file = next(folder.glob("*.dcm"))
+    result = load_series_from_file(one_file)
+    assert len(result.studies) == 1
+    assert result.studies[0].modality == "MR"
+    assert result.studies[0].volume.array.dtype == np.float32
+
+
+def test_load_single_file_non_dicom_raises(tmp_path):
+    bad = tmp_path / "not_dicom.txt"
+    bad.write_text("hello")
+    with pytest.raises(LoaderError):
+        load_series_from_file(bad)
+
+
+def test_load_single_file_missing_raises(tmp_path):
+    with pytest.raises(LoaderError):
+        load_series_from_file(tmp_path / "nope.dcm")
