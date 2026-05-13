@@ -21,22 +21,19 @@ def test_is_available_does_not_crash():
 
 
 def test_segment_slice_raises_unavailable_when_torch_missing(monkeypatch):
-    """If torch isn't installed, segment_slice raises MedSAMUnavailable —
-    UI handles this case by disabling the feature."""
-    # Simulate missing torch by removing it from sys.modules and blocking re-import.
-    import sys
+    """If torch couldn't be imported at module load, segment_slice raises
+    MedSAMUnavailable — the UI handles this case by disabling the feature."""
+    # torch is imported eagerly at module load; simulate a failed import by
+    # flipping the module-level flag.
+    from dicom_viewer.core.segmentation import medsam
 
-    original_torch = sys.modules.pop("torch", None)
-    sys.modules["torch"] = None  # type: ignore[assignment]
-    try:
-        seg = MedSAMSegmenter()
-        with pytest.raises((MedSAMUnavailable, ModuleNotFoundError, TypeError)):
-            seg.segment_slice(np.zeros((8, 8), dtype=np.int16), (1, 1, 5, 5))
-    finally:
-        if original_torch is not None:
-            sys.modules["torch"] = original_torch
-        else:
-            sys.modules.pop("torch", None)
+    monkeypatch.setattr(medsam, "_TORCH_AVAILABLE", False)
+    monkeypatch.setattr(medsam, "_TORCH_IMPORT_ERROR", ImportError("simulated"))
+
+    seg = MedSAMSegmenter()
+    assert seg.is_available() is False
+    with pytest.raises(MedSAMUnavailable):
+        seg.segment_slice(np.zeros((8, 8), dtype=np.int16), (1, 1, 5, 5))
 
 
 def test_segment_volume_z_rejects_empty_region():

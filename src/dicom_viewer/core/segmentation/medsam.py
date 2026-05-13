@@ -1,9 +1,22 @@
 """MedSAM integration — bounding-box-prompted segmentation via SAM.
 
 Wraps the HuggingFace SamModel + SamProcessor with weights from
-`wanglab/medsam-vit-base` so you get a click-and-segment experience.
-The torch / transformers / pillow stack is optional — `is_available()`
-returns False if the install is missing.
+`wanglab/medsam-vit-base`. `is_available()` returns False if torch /
+transformers couldn't be imported when this module first loaded.
+
+Threading notes
+---------------
+torch / transformers are imported at module load time, NOT lazily inside
+the inference call, because importing torch from a non-main thread
+(specifically the Qt worker thread used in the UI) can segfault — PyTorch
+initialises thread-local state on import and that initialisation is not
+safe outside the main thread on every platform.
+
+We also cap torch's internal thread pools to 1 thread. SAM inference is
+mostly cuBLAS / MKL calls under the hood; running it from a Qt worker
+thread on top of an OpenMP-multithreaded backend has historically caused
+intermittent core dumps. One thread is plenty for the inference rates we
+need on CPU.
 
 Workflow:
     seg = MedSAMSegmenter()
@@ -30,9 +43,43 @@ _MODEL_ID = "wanglab/medsam-vit-base"
 # usual torch.cuda.is_available() check passes.
 _CUDA_OPT_IN_ENV = "DICOM_VIEWER_MEDSAM_CUDA"
 
+# Cap thread pools BEFORE torch is imported (these env vars are read once
+# at C-extension init time).
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+# Eager import so the heavy native libs load on whichever thread first
+# imports this module — in the running app that's the main thread, because
+# the segmentation panel does `from .medsam import MedSAMSegmenter` in its
+# button click handler (main thread) before kicking off the worker.
+try:
+    import torch as _torch
+    from transformers import SamModel as _SamModel  # type: ignore[import-not-found]
+    from transformers import SamProcessor as _SamProcessor  # type: ignore[import-not-found]
+
+    # Defensive: keep torch single-threaded so the QThread worker doesn't
+    # fight with torch's internal thread pools.
+    try:
+        _torch.set_num_threads(1)
+    except Exception:
+        pass
+    try:
+        _torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+
+    _TORCH_AVAILABLE = True
+    _TORCH_IMPORT_ERROR: Optional[BaseException] = None
+except Exception as _e:  # noqa: BLE001
+    _torch = None  # type: ignore[assignment]
+    _SamModel = None  # type: ignore[assignment]
+    _SamProcessor = None  # type: ignore[assignment]
+    _TORCH_AVAILABLE = False
+    _TORCH_IMPORT_ERROR = _e
+
 
 class MedSAMUnavailable(Exception):
-    """Raised when torch / transformers aren't installed."""
+    """Raised when torch / transformers aren't installed or the model fails to load."""
 
 
 class MedSAMSegmenter:
@@ -45,34 +92,27 @@ class MedSAMSegmenter:
 
     @staticmethod
     def is_available() -> bool:
-        """Returns True if torch + transformers are importable."""
-        try:
-            import torch  # noqa: F401
-            import transformers  # noqa: F401
-        except ImportError:
-            return False
-        return True
+        """Returns True if torch + transformers loaded successfully at import."""
+        return _TORCH_AVAILABLE
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
-        try:
-            import torch
-            from transformers import SamModel, SamProcessor
-        except ImportError as e:
+        if not _TORCH_AVAILABLE:
             raise MedSAMUnavailable(
                 "MedSAM requires `torch` and `transformers`. "
                 "These ship with the standard install; if you're running from "
-                "source and they're missing, run: "
-                "pip install torch transformers pillow"
-            ) from e
+                f"source and they're missing, run: "
+                f"pip install torch transformers pillow  "
+                f"(import error was: {_TORCH_IMPORT_ERROR})"
+            )
 
         # Device selection: CPU is the safe default. Opt into CUDA only when
         # the user explicitly sets the env var AND torch reports it available.
         cuda_ok = False
         if os.environ.get(_CUDA_OPT_IN_ENV) == "1":
             try:
-                cuda_ok = bool(torch.cuda.is_available())
+                cuda_ok = bool(_torch.cuda.is_available())
             except Exception:
                 cuda_ok = False
         self._device = "cuda" if cuda_ok else "cpu"
@@ -80,11 +120,11 @@ class MedSAMSegmenter:
         # Wrap the model + processor load: failures are surfaced as a clean
         # MedSAMUnavailable instead of letting torch native code segfault.
         try:
-            model = SamModel.from_pretrained(_MODEL_ID)
+            model = _SamModel.from_pretrained(_MODEL_ID)
             model = model.to(self._device)
             model.eval()
             self._model = model
-            self._processor = SamProcessor.from_pretrained(_MODEL_ID)
+            self._processor = _SamProcessor.from_pretrained(_MODEL_ID)
         except Exception as e:
             self._model = None
             self._processor = None
@@ -110,7 +150,6 @@ class MedSAMSegmenter:
         coordinates of the slice, ordered (x0, y0, x1, y1) — SAM convention.
         """
         self._ensure_loaded()
-        import torch
 
         # Normalize the slice to uint8 RGB — SAM was trained on natural images.
         s = slice_2d.astype(np.float32)
@@ -127,7 +166,7 @@ class MedSAMSegmenter:
             return_tensors="pt",
         ).to(self._device)
 
-        with torch.no_grad():
+        with _torch.no_grad():
             outputs = self._model(**inputs, multimask_output=False)
 
         masks = self._processor.image_processor.post_process_masks(
