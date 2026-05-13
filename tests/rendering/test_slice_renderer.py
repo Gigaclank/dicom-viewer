@@ -44,3 +44,15 @@ def test_slice_renderer_overlay_does_not_crash():
     mask[2:5, 2:5, 2:5] = True
     r.set_overlay_mask(mask)
     r.render()
+
+
+def test_slice_renderer_reset_view_restores_default_camera():
+    r = SliceRenderer(orientation=Orientation.AXIAL)
+    r.set_volume(_vol())
+    # Move the camera arbitrarily; reset_view should restore a sensible default.
+    cam = r._renderer.GetActiveCamera()
+    cam.Zoom(3.0)
+    cam.SetViewUp(0.0, 0.0, 1.0)  # nonsense up-vector for an axial slice
+    r.reset_view()
+    # View-up is restored to (0, 1, 0).
+    assert cam.GetViewUp() == (0.0, 1.0, 0.0)

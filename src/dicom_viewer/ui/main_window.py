@@ -71,6 +71,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(open_folder_action)
         file_menu.addAction(open_file_action)
 
+        reset_views_action = QAction("Reset All Views", self)
+        reset_views_action.setShortcut("Ctrl+R")
+        reset_views_action.triggered.connect(self._on_reset_views)
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(reset_views_action)
+
         self.document.subscribe(self._on_doc_event)
 
     def _on_open_folder(self) -> None:
@@ -109,6 +115,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Load failed", str(e))
             return
         self.document.set_study(result.studies[0])
+
+    def _on_reset_views(self) -> None:
+        self.axial.reset_view()
+        self.coronal.reset_view()
+        self.sagittal.reset_view()
 
     def _on_doc_event(self, kind: str) -> None:
         volume = self.document.volume

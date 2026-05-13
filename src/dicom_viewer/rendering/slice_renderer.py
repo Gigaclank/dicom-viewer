@@ -43,6 +43,11 @@ class SliceRenderer:
     def attach_render_window(self, render_window: vtk.vtkRenderWindow) -> None:
         render_window.AddRenderer(self._renderer)
         self._render_window = render_window
+        # Use the image-restricted interactor style so the user can pan/zoom
+        # but NOT rotate the slice (rotation makes no sense for an MPR view).
+        interactor = render_window.GetInteractor()
+        if interactor is not None:
+            interactor.SetInteractorStyle(vtk.vtkInteractorStyleImage())
 
     # --- inputs ---
     def set_volume(self, volume: Volume) -> None:
@@ -75,6 +80,14 @@ class SliceRenderer:
     def render(self) -> None:
         if self._render_window is not None:
             self._render_window.Render()
+
+    def reset_view(self) -> None:
+        """Restore default zoom/pan/orientation for this pane."""
+        camera = self._renderer.GetActiveCamera()
+        camera.SetViewUp(0.0, 1.0, 0.0)
+        self._renderer.ResetCamera()
+        self._renderer.ResetCameraClippingRange()
+        self.render()
 
     # --- internals ---
     def _max_index(self) -> int:

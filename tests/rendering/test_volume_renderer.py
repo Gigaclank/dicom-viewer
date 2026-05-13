@@ -35,3 +35,9 @@ def test_volume_renderer_region_box():
 def test_volume_renderer_handles_no_volume():
     r = VolumeRenderer()
     r.render()  # must not raise
+
+
+def test_volume_renderer_reset_view_does_not_crash():
+    r = VolumeRenderer()
+    r.set_volume(_vol())
+    r.reset_view()

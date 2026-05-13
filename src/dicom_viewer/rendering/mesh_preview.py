@@ -44,3 +44,9 @@ class MeshPreview:
     def render(self) -> None:
         if self._render_window is not None:
             self._render_window.Render()
+
+    def reset_view(self) -> None:
+        """Restore default zoom/orientation for the mesh preview camera."""
+        self._renderer.ResetCamera()
+        self._renderer.ResetCameraClippingRange()
+        self.render()

@@ -118,6 +118,12 @@ class VolumeRenderer:
         if self._render_window is not None:
             self._render_window.Render()
 
+    def reset_view(self) -> None:
+        """Restore default zoom/orientation for the 3D camera."""
+        self._renderer.ResetCamera()
+        self._renderer.ResetCameraClippingRange()
+        self.render()
+
 
 def _volume_to_vtk_image(volume: Volume) -> vtk.vtkImageData:
     arr = volume.array

@@ -35,3 +35,16 @@ def test_slice_view_emits_slice_changed_signal(qtbot, vol):
     with qtbot.waitSignal(view.slice_changed, timeout=500) as blocker:
         view.scrollbar.setValue(4)
     assert blocker.args == [4]
+
+
+def test_slice_view_reset_button_present_and_resets(qtbot, vol):
+    view = SliceView(orientation=Orientation.AXIAL)
+    qtbot.addWidget(view)
+    view.set_volume(vol)
+    assert view.reset_button.text() == "Reset view"
+    # Perturb the camera, then click reset.
+    cam = view._renderer._renderer.GetActiveCamera()
+    cam.Zoom(2.0)
+    cam.SetViewUp(0.0, 0.0, 1.0)
+    view.reset_button.click()
+    assert cam.GetViewUp() == (0.0, 1.0, 0.0)

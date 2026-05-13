@@ -5,7 +5,14 @@ import os
 
 import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QScrollBar, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from dicom_viewer.core.volume import Orientation, Volume
 from dicom_viewer.rendering.slice_renderer import SliceRenderer
@@ -44,13 +51,19 @@ class SliceView(QWidget):
         self.scrollbar.valueChanged.connect(self._on_scroll)
 
         self._label = QLabel(f"{orientation.value} — 0 / 0")
+        self.reset_button = QPushButton("Reset view")
+        self.reset_button.setToolTip("Reset zoom, pan, and orientation for this pane")
+        self.reset_button.clicked.connect(self.reset_view)
 
         row = QHBoxLayout()
         row.addWidget(self._vtk_widget, stretch=1)
         row.addWidget(self.scrollbar)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self._label, stretch=1)
+        bottom.addWidget(self.reset_button)
         layout = QVBoxLayout(self)
         layout.addLayout(row, stretch=1)
-        layout.addWidget(self._label)
+        layout.addLayout(bottom)
 
     def set_volume(self, volume: Volume) -> None:
         self._volume = volume
@@ -71,6 +84,10 @@ class SliceView(QWidget):
         self._renderer.set_overlay_mask(mask)
         if hasattr(self._vtk_widget, "GetRenderWindow"):
             self._renderer.render()
+
+    def reset_view(self) -> None:
+        """Reset zoom, pan, and orientation for this pane to default."""
+        self._renderer.reset_view()
 
     @property
     def current_index(self) -> int:

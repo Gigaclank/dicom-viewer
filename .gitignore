@@ -10,3 +10,16 @@ __pycache__/
 dist/
 build/
 .coverage
+
+# DICOM data / test corpora — never commit raw scans or downloaded datasets.
+*.dcm
+*.DCM
+*.dicom
+*.DICOM
+*.stl
+*.zip
+data/
+dicom_viewer_*/
+
+# Allow tests/fixtures/ if it ever contains tracked .dcm fixtures (none today).
+!tests/fixtures/**/*.dcm
