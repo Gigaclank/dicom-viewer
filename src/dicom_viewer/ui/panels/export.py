@@ -24,6 +24,7 @@ from dicom_viewer.core.mesh_export import (
     export_stl,
     generate_mesh,
 )
+from dicom_viewer.io.project import ExportSettings
 from dicom_viewer.ui.widgets.labeled_slider import LabeledFloatSlider, LabeledSlider
 
 
@@ -171,6 +172,19 @@ class ExportPanel(QWidget):
         self._status.setText(f"Export failed: {msg}")
         self._status.setToolTip("")
         QMessageBox.critical(self, "Export failed", msg)
+
+    # --- project file integration ---
+    def get_settings(self) -> ExportSettings:
+        return ExportSettings(
+            smoothing_iterations=self.smoothing_slider.value(),
+            decimation_reduction=self.decimation_slider.float_value(),
+            ensure_manifold=self.manifold_checkbox.isChecked(),
+        )
+
+    def apply_settings(self, s: ExportSettings) -> None:
+        self.smoothing_slider.setValue(s.smoothing_iterations)
+        self.decimation_slider.setFloatValue(s.decimation_reduction)
+        self.manifold_checkbox.setChecked(s.ensure_manifold)
 
     # --- helpers ---
     def _suggested_filename(self) -> str:

@@ -16,6 +16,7 @@ from dicom_viewer.core.document import Document
 from dicom_viewer.core.segmentation.morphology import keep_largest_component, smooth_mask
 from dicom_viewer.core.segmentation.region_grow import region_grow
 from dicom_viewer.core.segmentation.threshold import threshold
+from dicom_viewer.io.project import SegmentationSettings
 from dicom_viewer.ui.widgets.labeled_slider import LabeledSlider
 
 
@@ -139,6 +140,52 @@ class SegmentationPanel(QWidget):
                 self._status.setText("No segmentation")
             else:
                 self._status.setText(f"{seg.method} — {seg.voxel_count:,} voxels")
+
+    # --- project file integration ---
+    def get_settings(self) -> SegmentationSettings:
+        return SegmentationSettings(
+            method=self.method_combo.currentText(),
+            low=self.low_slider.value(),
+            high=self.high_slider.value(),
+            seed_z=self.seed_z.value(),
+            seed_y=self.seed_y.value(),
+            seed_x=self.seed_x.value(),
+            tolerance=self.tolerance_slider.value(),
+            keep_largest_component=self.largest_component_checkbox.isChecked(),
+            smooth=self.smooth_checkbox.isChecked(),
+            live_preview=self.live_preview_checkbox.isChecked(),
+        )
+
+    def apply_settings(self, s: SegmentationSettings) -> None:
+        self._suppress_live = True
+        try:
+            idx = self.method_combo.findText(s.method)
+            if idx >= 0:
+                self.method_combo.setCurrentIndex(idx)
+            # The slider range was sized to the volume's intensity range, but
+            # the user may have saved a value outside that range. Widen the
+            # range as needed so setValue doesn't silently clamp.
+            self._widen_to_fit(self.low_slider, s.low)
+            self._widen_to_fit(self.high_slider, s.high)
+            self.low_slider.setValue(s.low)
+            self.high_slider.setValue(s.high)
+            self.seed_z.setValue(s.seed_z)
+            self.seed_y.setValue(s.seed_y)
+            self.seed_x.setValue(s.seed_x)
+            self.tolerance_slider.setValue(s.tolerance)
+            self.largest_component_checkbox.setChecked(s.keep_largest_component)
+            self.smooth_checkbox.setChecked(s.smooth)
+            self.live_preview_checkbox.setChecked(s.live_preview)
+        finally:
+            self._suppress_live = False
+        # Compute once with the loaded settings so the segmentation appears.
+        self._apply_now()
+
+    @staticmethod
+    def _widen_to_fit(slider: LabeledSlider, target: int) -> None:
+        lo = min(slider.slider.minimum(), target)
+        hi = max(slider.slider.maximum(), target)
+        slider.setRange(lo, hi)
 
     def _refresh_slider_range(self) -> None:
         volume = self._document.volume
