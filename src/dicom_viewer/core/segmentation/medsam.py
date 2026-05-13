@@ -12,6 +12,7 @@ Workflow:
 """
 from __future__ import annotations
 
+import os
 from typing import Callable, Optional
 
 import numpy as np
@@ -21,6 +22,13 @@ from dicom_viewer.core.segmentation.base import Segmentation
 from dicom_viewer.core.volume import Volume
 
 _MODEL_ID = "wanglab/medsam-vit-base"
+# CUDA opt-in: by default we run on CPU because the pip-installed torch
+# wheels bundle bleeding-edge CUDA runtimes (CUDA 13+) that very few user
+# machines have drivers for; the mismatch crashes at native level (core
+# dump). Users who know their GPU + drivers match can opt in with this
+# env var. Setting it does NOT force GPU — it just allows CUDA if the
+# usual torch.cuda.is_available() check passes.
+_CUDA_OPT_IN_ENV = "DICOM_VIEWER_MEDSAM_CUDA"
 
 
 class MedSAMUnavailable(Exception):
@@ -59,11 +67,31 @@ class MedSAMSegmenter:
                 "pip install torch transformers pillow"
             ) from e
 
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        # First call downloads ~360MB of weights into the HF cache.
-        self._model = SamModel.from_pretrained(_MODEL_ID).to(self._device)
-        self._model.eval()
-        self._processor = SamProcessor.from_pretrained(_MODEL_ID)
+        # Device selection: CPU is the safe default. Opt into CUDA only when
+        # the user explicitly sets the env var AND torch reports it available.
+        cuda_ok = False
+        if os.environ.get(_CUDA_OPT_IN_ENV) == "1":
+            try:
+                cuda_ok = bool(torch.cuda.is_available())
+            except Exception:
+                cuda_ok = False
+        self._device = "cuda" if cuda_ok else "cpu"
+
+        # Wrap the model + processor load: failures are surfaced as a clean
+        # MedSAMUnavailable instead of letting torch native code segfault.
+        try:
+            model = SamModel.from_pretrained(_MODEL_ID)
+            model = model.to(self._device)
+            model.eval()
+            self._model = model
+            self._processor = SamProcessor.from_pretrained(_MODEL_ID)
+        except Exception as e:
+            self._model = None
+            self._processor = None
+            raise MedSAMUnavailable(
+                f"Failed to load MedSAM model (device={self._device!r}): {e}. "
+                f"If you opted into CUDA via {_CUDA_OPT_IN_ENV}=1, try without it."
+            ) from e
 
     @property
     def device(self) -> str:
