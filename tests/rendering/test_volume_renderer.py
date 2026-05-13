@@ -37,10 +37,33 @@ def test_volume_renderer_handles_no_volume():
     r.render()  # must not raise
 
 
-def test_volume_renderer_reset_view_does_not_crash():
+def test_volume_renderer_reset_view_restores_home_camera():
+    """Regression: reset_view must actually undo a user rotation.
+
+    Plain vtkRenderer.ResetCamera() preserves the existing view direction and
+    view-up vector, so it only re-distances the camera. We need a true reset
+    that snaps position + focal point + view-up back to the state captured
+    when the volume was first loaded.
+    """
     r = VolumeRenderer()
     r.set_volume(_vol())
+    cam = r._renderer.GetActiveCamera()
+    home_position = cam.GetPosition()
+    home_view_up = cam.GetViewUp()
+
+    # Move the camera around — simulating user interaction.
+    cam.SetPosition(home_position[0] + 100, home_position[1] + 50, home_position[2] - 30)
+    cam.SetViewUp(1.0, 0.0, 0.0)  # nonsense up-vector
+    assert cam.GetPosition() != home_position
+    assert cam.GetViewUp() != home_view_up
+
     r.reset_view()
+    assert cam.GetPosition() == home_position
+    assert cam.GetViewUp() == home_view_up
+
+
+def test_volume_renderer_reset_view_without_volume_does_not_crash():
+    VolumeRenderer().reset_view()  # no scene yet — must not raise
 
 
 def test_overlay_mask_hides_volume_and_shows_surface():

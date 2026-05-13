@@ -24,6 +24,13 @@ class VolumeRenderer:
         # one re-render the overlay surface with the correct crop.
         self._latest_mask: np.ndarray | None = None
         self._region: Region | None = None
+        # Snapshot of the camera state that we treat as the "home" position
+        # for reset_view. Captured right after set_volume positions the camera
+        # to fit the scene. None until a volume has been loaded.
+        self._home_position: tuple[float, float, float] | None = None
+        self._home_focal: tuple[float, float, float] | None = None
+        self._home_view_up: tuple[float, float, float] | None = None
+        self._home_parallel_scale: float | None = None
 
         if os.environ.get("DICOM_VIEWER_OFFSCREEN") == "1":
             rw = vtk.vtkRenderWindow()
@@ -71,6 +78,15 @@ class VolumeRenderer:
         self._renderer.AddVolume(actor)
         self._volume_actor = actor
         self._renderer.ResetCamera()
+        self._capture_home_camera()
+
+    def _capture_home_camera(self) -> None:
+        """Remember the current camera state as the reset target."""
+        cam = self._renderer.GetActiveCamera()
+        self._home_position = tuple(cam.GetPosition())
+        self._home_focal = tuple(cam.GetFocalPoint())
+        self._home_view_up = tuple(cam.GetViewUp())
+        self._home_parallel_scale = float(cam.GetParallelScale())
 
     def set_region(self, region: Region) -> None:
         self._region = region
@@ -158,8 +174,28 @@ class VolumeRenderer:
             self._render_window.Render()
 
     def reset_view(self) -> None:
-        """Restore default zoom/orientation for the 3D camera."""
-        self._renderer.ResetCamera()
+        """Restore the camera to the position captured when the volume loaded.
+
+        Plain ResetCamera() only re-distances the camera to fit the scene; it
+        preserves the current view direction and view-up vector, so a user who
+        has rotated the camera does NOT actually see the original orientation
+        come back. Restoring the captured home state fixes that.
+        """
+        if (
+            self._home_position is None
+            or self._home_focal is None
+            or self._home_view_up is None
+        ):
+            # No volume loaded yet — fall back to ResetCamera() so we at least
+            # frame whatever's in the scene.
+            self._renderer.ResetCamera()
+        else:
+            cam = self._renderer.GetActiveCamera()
+            cam.SetPosition(*self._home_position)
+            cam.SetFocalPoint(*self._home_focal)
+            cam.SetViewUp(*self._home_view_up)
+            if self._home_parallel_scale is not None:
+                cam.SetParallelScale(self._home_parallel_scale)
         self._renderer.ResetCameraClippingRange()
         self.render()
 
