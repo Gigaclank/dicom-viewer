@@ -54,8 +54,9 @@ class MedSAMSegmenter:
         except ImportError as e:
             raise MedSAMUnavailable(
                 "MedSAM requires `torch` and `transformers`. "
-                "Install with: pip install 'dicom-viewer[medsam]' "
-                "or: pip install torch transformers pillow"
+                "These ship with the standard install; if you're running from "
+                "source and they're missing, run: "
+                "pip install torch transformers pillow"
             ) from e
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"

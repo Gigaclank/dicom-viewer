@@ -4,6 +4,8 @@ A real model run downloads ~360MB of weights and needs torch installed,
 so the substantive run is gated behind `torch` being importable. The
 availability + import-pathway checks always run.
 """
+import os
+
 import numpy as np
 import pytest
 
@@ -50,13 +52,18 @@ def test_segment_volume_z_rejects_empty_region():
 
 
 @pytest.mark.skipif(
-    not MedSAMSegmenter.is_available(),
-    reason="MedSAM requires torch + transformers (install dicom-viewer[medsam])",
+    not MedSAMSegmenter.is_available()
+    or not os.environ.get("DICOM_VIEWER_RUN_MEDSAM_TEST"),
+    reason=(
+        "Real MedSAM inference is gated behind DICOM_VIEWER_RUN_MEDSAM_TEST=1 "
+        "because it downloads ~360MB of weights from HuggingFace and runs "
+        "actual torch inference. Set the env var to opt in."
+    ),
 )
 def test_segment_volume_z_integration_smoke():
-    """Skipped when torch isn't installed; otherwise runs a single-slice
-    inference against a real downloaded model. The first time this runs in a
-    fresh environment it'll download ~360MB of weights from HuggingFace."""
+    """Opt-in real inference. Set DICOM_VIEWER_RUN_MEDSAM_TEST=1 and ensure
+    torch + transformers are installed. The first run downloads ~360MB of
+    weights from HuggingFace."""
     # Tiny 2-slice volume so the test isn't slow even on CPU.
     arr = np.random.default_rng(0).integers(0, 1000, (2, 64, 64), dtype=np.int16)
     vol = Volume(array=arr, spacing_mm=(1.0, 1.0, 1.0), modality="CT")

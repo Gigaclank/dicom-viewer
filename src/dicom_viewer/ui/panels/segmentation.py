@@ -80,7 +80,7 @@ class SegmentationPanel(QWidget):
         self.medsam_button.setToolTip(
             "Run MedSAM (SAM-based medical segmenter) over the z-slices of "
             "the active region. The xy bounding box of the region is used as "
-            "the prompt. Requires the `medsam` extra: pip install 'dicom-viewer[medsam]'."
+            "the prompt. First click downloads ~360MB of model weights."
         )
         self.medsam_button.clicked.connect(self._on_medsam_clicked)
 
@@ -158,9 +158,9 @@ class SegmentationPanel(QWidget):
             QMessageBox.warning(
                 self,
                 "MedSAM not available",
-                "MedSAM requires extra dependencies.\n\n"
-                "Install with:\n    pip install 'dicom-viewer[medsam]'\n\n"
-                "First run will download ~360MB of model weights from HuggingFace.",
+                "torch / transformers couldn't be imported from this "
+                "environment. If you're running from source, run:\n\n"
+                "    pip install torch transformers pillow",
             )
             return
 

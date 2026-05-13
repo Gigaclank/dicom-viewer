@@ -30,11 +30,28 @@ for plug in ("pylibjpeg_libjpeg", "pylibjpeg_openjpeg"):
         # Plugin not installed — pydicom will fall back to less codecs.
         pass
 
+# torch + transformers (MedSAM) — both load many submodules lazily so the
+# static analyser misses them. collect_submodules pulls the whole tree;
+# excludes the parts that obviously aren't needed at runtime (tests etc.).
+for pkg in ("torch", "transformers", "tokenizers", "safetensors", "huggingface_hub"):
+    try:
+        hiddenimports += collect_submodules(pkg)
+    except Exception:
+        pass
+
 # SimpleITK ships its native libs alongside the Python package; PyInstaller
 # normally picks these up but collect_data_files makes sure data files (like
 # transform XMLs) come along.
 datas: list[tuple[str, str]] = []
-for pkg in ("vtkmodules", "SimpleITK", "pydicom", "pylibjpeg"):
+for pkg in (
+    "vtkmodules",
+    "SimpleITK",
+    "pydicom",
+    "pylibjpeg",
+    "torch",
+    "transformers",
+    "tokenizers",
+):
     try:
         datas += collect_data_files(pkg)
     except Exception:

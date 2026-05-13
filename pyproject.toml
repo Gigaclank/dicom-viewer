@@ -14,6 +14,12 @@ dependencies = [
     "SimpleITK>=2.3",
     "vtk>=9.3",
     "PyQt6>=6.6",
+    # MedSAM-based AI segmenter. Heavy (torch ~1GB+ on disk) but bundled by
+    # default so the shipped installers include the feature out-of-the-box.
+    # Model weights (~360MB) still auto-download from HuggingFace on first use.
+    "torch>=2.1",
+    "transformers>=4.40",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -22,14 +28,6 @@ dev = [
     "pytest-qt>=4.4",
     "ruff>=0.4",
     "mypy>=1.10",
-]
-# MedSAM-based interactive segmentation. Heavy (torch is ~700MB-2GB depending
-# on CUDA); install only when you want the AI segmenter. The model weights
-# (~360MB) auto-download from HuggingFace on first use.
-medsam = [
-    "torch>=2.1",
-    "transformers>=4.40",
-    "pillow>=10.0",
 ]
 
 [project.scripts]
