@@ -1,4 +1,4 @@
-"""MainWindow — four-pane MPR + 3D layout with side dock for panels."""
+"""MainWindow — tabbed views (axial / coronal / sagittal / 3D) with tools dock."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,12 +8,10 @@ from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QDockWidget,
     QFileDialog,
-    QGridLayout,
     QInputDialog,
     QMainWindow,
     QMessageBox,
     QTabWidget,
-    QWidget,
 )
 
 from dicom_viewer.core.document import Document
@@ -44,13 +42,12 @@ class MainWindow(QMainWindow):
         self.sagittal = SliceView(Orientation.SAGITTAL)
         self.volume3d = Volume3DView()
 
-        grid_host = QWidget()
-        grid = QGridLayout(grid_host)
-        grid.addWidget(self.axial, 0, 0)
-        grid.addWidget(self.coronal, 0, 1)
-        grid.addWidget(self.sagittal, 1, 0)
-        grid.addWidget(self.volume3d, 1, 1)
-        self.setCentralWidget(grid_host)
+        self.view_tabs = QTabWidget()
+        self.view_tabs.addTab(self.axial, "Axial")
+        self.view_tabs.addTab(self.coronal, "Coronal")
+        self.view_tabs.addTab(self.sagittal, "Sagittal")
+        self.view_tabs.addTab(self.volume3d, "3D")
+        self.setCentralWidget(self.view_tabs)
 
         self.export_panel = ExportPanel(self.document)
         self._preview_dialog: MeshPreviewDialog | None = None
