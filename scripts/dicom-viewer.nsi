@@ -1,0 +1,88 @@
+; NSIS installer for DICOM Viewer (Windows).
+;
+; Build (after pyinstaller has produced dist\dicom-viewer\):
+;     makensis /DAPP_VERSION=0.1.0 scripts\dicom-viewer.nsi
+;
+; CI passes APP_VERSION via /D from the git tag.
+
+!ifndef APP_VERSION
+    !define APP_VERSION "0.0.0-dev"
+!endif
+
+!define APP_NAME       "DICOM Viewer"
+!define APP_PUBLISHER  "Aaron"
+!define APP_EXE        "dicom-viewer.exe"
+!define APP_KEY        "${APP_NAME}"
+
+Name "${APP_NAME} ${APP_VERSION}"
+OutFile "dist\dicom-viewer-${APP_VERSION}-setup.exe"
+InstallDir "$PROGRAMFILES64\${APP_NAME}"
+InstallDirRegKey HKLM "Software\${APP_KEY}" "InstallDir"
+RequestExecutionLevel admin
+SetCompressor /SOLID lzma
+
+!include "MUI2.nsh"
+!define MUI_ICON   "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
+!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+!define MUI_ABORTWARNING
+
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_WELCOME
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_UNPAGE_FINISH
+
+!insertmacro MUI_LANGUAGE "English"
+
+Section "${APP_NAME} (required)" SecCore
+    SectionIn RO
+    SetOutPath "$INSTDIR"
+    ; PyInstaller --onedir output. /r recurses into the whole tree.
+    File /r "dist\dicom-viewer\*.*"
+
+    ; Start Menu shortcut.
+    CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+    CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+    CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
+
+    ; Desktop shortcut.
+    CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+
+    ; Register .dcmproj so double-clicking opens the app.
+    WriteRegStr HKCR ".dcmproj" "" "DicomViewer.Project"
+    WriteRegStr HKCR "DicomViewer.Project" "" "DICOM Viewer Project"
+    WriteRegStr HKCR "DicomViewer.Project\DefaultIcon" "" "$INSTDIR\${APP_EXE},0"
+    WriteRegStr HKCR "DicomViewer.Project\shell\open\command" "" '"$INSTDIR\${APP_EXE}" "%1"'
+
+    ; Add/Remove Programs entry.
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}" \
+        "DisplayName" "${APP_NAME}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}" \
+        "DisplayVersion" "${APP_VERSION}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}" \
+        "Publisher" "${APP_PUBLISHER}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}" \
+        "UninstallString" "$INSTDIR\Uninstall.exe"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}" \
+        "InstallLocation" "$INSTDIR"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}" \
+        "DisplayIcon" "$INSTDIR\${APP_EXE}"
+
+    WriteUninstaller "$INSTDIR\Uninstall.exe"
+SectionEnd
+
+Section "Uninstall"
+    Delete "$DESKTOP\${APP_NAME}.lnk"
+    RMDir /r "$SMPROGRAMS\${APP_NAME}"
+
+    DeleteRegKey HKCR ".dcmproj"
+    DeleteRegKey HKCR "DicomViewer.Project"
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_KEY}"
+    DeleteRegKey HKLM "Software\${APP_KEY}"
+
+    RMDir /r "$INSTDIR"
+SectionEnd
