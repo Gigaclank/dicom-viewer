@@ -46,6 +46,26 @@ def test_slice_renderer_overlay_does_not_crash():
     r.render()
 
 
+def test_overlay_refreshes_when_slice_index_changes():
+    """Regression: scrolling slices must update the overlay actor's image data,
+    not leave it stale on the previously-displayed slice."""
+    r = SliceRenderer(orientation=Orientation.AXIAL)
+    r.set_volume(_vol())
+    # Mask varies between slices so we can detect whether the overlay tracks them.
+    mask = np.zeros((6, 6, 6), dtype=bool)
+    mask[2, :, :] = True   # axial slice 2 fully masked
+    mask[4, :, :] = False  # axial slice 4 fully unmasked
+    r.set_overlay_mask(mask)
+    r.set_slice_index(2)
+    overlay_at_2 = r._overlay_actor.GetInput().GetPointData().GetScalars()
+    sum_at_2 = sum(overlay_at_2.GetTuple4(i)[3] for i in range(overlay_at_2.GetNumberOfTuples()))
+    r.set_slice_index(4)
+    overlay_at_4 = r._overlay_actor.GetInput().GetPointData().GetScalars()
+    sum_at_4 = sum(overlay_at_4.GetTuple4(i)[3] for i in range(overlay_at_4.GetNumberOfTuples()))
+    assert sum_at_2 > 0    # slice 2 has alpha > 0 where mask is true
+    assert sum_at_4 == 0   # slice 4 has no mask -> alpha all zero
+
+
 def test_slice_renderer_reset_view_restores_default_camera():
     r = SliceRenderer(orientation=Orientation.AXIAL)
     r.set_volume(_vol())

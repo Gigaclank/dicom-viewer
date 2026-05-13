@@ -62,6 +62,8 @@ class SliceRenderer:
             return
         self._index = max(0, min(index, self._max_index()))
         self._refresh_image()
+        # The overlay is per-slice too — refresh so the mask follows the slice.
+        self._refresh_overlay()
 
     def set_windowing(self, center: float, width: float) -> None:
         self._center = center
