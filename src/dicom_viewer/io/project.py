@@ -28,6 +28,9 @@ class ProjectError(Exception):
 class SourceSettings:
     kind: str = ""           # "folder" | "file" | "" (empty)
     path: str = ""
+    # For folder sources with multiple series, identifies which one the user
+    # was viewing. Empty string means "load whatever was first".
+    series_uid: str = ""
 
 
 @dataclass

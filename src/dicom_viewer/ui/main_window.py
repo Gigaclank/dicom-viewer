@@ -6,16 +6,19 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDockWidget,
     QFileDialog,
-    QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QTabWidget,
+    QToolBar,
 )
 
 from dicom_viewer.core.document import Document, WindowingState
 from dicom_viewer.core.region import Region
+from dicom_viewer.core.study import Study
 from dicom_viewer.core.volume import Orientation
 from dicom_viewer.io.config import save_last_project
 from dicom_viewer.io.dicom_loader import (
@@ -69,6 +72,9 @@ class MainWindow(QMainWindow):
         # Last source loaded (folder or file) — saved into projects so they can
         # re-open the same DICOM data without the user picking it again.
         self._current_source: SourceSettings = SourceSettings()
+        # All studies pulled from the most recent folder (or [study] for a file).
+        # The series picker switches the active one without re-loading the folder.
+        self._loaded_studies: list[Study] = []
         self.export_panel.mesh_ready.connect(self._on_mesh_ready)
 
         tabs = QTabWidget()
@@ -78,6 +84,19 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Tools", self)
         dock.setWidget(tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+        # Series picker toolbar — only meaningful for folders that contain
+        # more than one series, but kept always-visible so the user knows
+        # which series they're viewing.
+        self.series_combo = QComboBox()
+        self.series_combo.setMinimumWidth(280)
+        self.series_combo.currentIndexChanged.connect(self._on_series_combo_changed)
+        series_toolbar = QToolBar("Series", self)
+        series_toolbar.setMovable(False)
+        series_toolbar.addWidget(QLabel("Series: "))
+        series_toolbar.addWidget(self.series_combo)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, series_toolbar)
+        self._refresh_series_combo()
 
         new_project_action = QAction("New Project", self)
         new_project_action.setShortcut("Ctrl+N")
@@ -120,23 +139,25 @@ class MainWindow(QMainWindow):
             return
         self.open_folder_path(Path(folder))
 
-    def open_folder_path(self, folder: Path) -> bool:
+    def open_folder_path(self, folder: Path, preferred_series_uid: str = "") -> bool:
         try:
             result = load_series_from_folder(folder)
         except LoaderError as e:
             QMessageBox.warning(self, "Load failed", str(e))
             return False
-        if len(result.studies) == 1:
-            chosen = result.studies[0]
-        else:
-            items = [s.display_name for s in result.studies]
-            picked, ok = QInputDialog.getItem(
-                self, "Pick a series", "Multiple series found:", items, 0, False
-            )
-            if not ok:
-                return False
-            chosen = result.studies[items.index(picked)]
-        self._current_source = SourceSettings(kind="folder", path=str(folder))
+        # Cache every study so the user can switch series without reloading.
+        self._loaded_studies = list(result.studies)
+        # Pick the preferred series if it's there, else the first.
+        chosen = self._loaded_studies[0]
+        if preferred_series_uid:
+            for s in self._loaded_studies:
+                if s.series_uid == preferred_series_uid:
+                    chosen = s
+                    break
+        self._current_source = SourceSettings(
+            kind="folder", path=str(folder), series_uid=chosen.series_uid
+        )
+        self._refresh_series_combo(active=chosen)
         self.document.set_study(chosen)
         return True
 
@@ -157,9 +178,48 @@ class MainWindow(QMainWindow):
         except LoaderError as e:
             QMessageBox.warning(self, "Load failed", str(e))
             return False
-        self._current_source = SourceSettings(kind="file", path=str(path))
-        self.document.set_study(result.studies[0])
+        chosen = result.studies[0]
+        self._loaded_studies = list(result.studies)
+        self._current_source = SourceSettings(
+            kind="file", path=str(path), series_uid=chosen.series_uid
+        )
+        self._refresh_series_combo(active=chosen)
+        self.document.set_study(chosen)
         return True
+
+    def _refresh_series_combo(self, active: Study | None = None) -> None:
+        """Repopulate the series dropdown for the current _loaded_studies list."""
+        self.series_combo.blockSignals(True)
+        try:
+            self.series_combo.clear()
+            if not self._loaded_studies:
+                self.series_combo.addItem("(no study loaded)")
+                self.series_combo.setEnabled(False)
+                return
+            self.series_combo.setEnabled(len(self._loaded_studies) > 1)
+            chosen_index = 0
+            for i, study in enumerate(self._loaded_studies):
+                self.series_combo.addItem(study.display_name)
+                if active is not None and study.series_uid == active.series_uid:
+                    chosen_index = i
+            self.series_combo.setCurrentIndex(chosen_index)
+        finally:
+            self.series_combo.blockSignals(False)
+
+    def _on_series_combo_changed(self, index: int) -> None:
+        if not (0 <= index < len(self._loaded_studies)):
+            return
+        study = self._loaded_studies[index]
+        # Don't reload if it's already the active study (avoids resetting the
+        # segmentation when the combo refresh runs).
+        if self.document.study is study:
+            return
+        self._current_source = SourceSettings(
+            kind=self._current_source.kind,
+            path=self._current_source.path,
+            series_uid=study.series_uid,
+        )
+        self.document.set_study(study)
 
     # --- project file handlers ---
     def _on_new_project(self) -> None:
@@ -245,7 +305,7 @@ class MainWindow(QMainWindow):
         if project.source.path:
             src = Path(project.source.path)
             if project.source.kind == "folder":
-                if not self.open_folder_path(src):
+                if not self.open_folder_path(src, preferred_series_uid=project.source.series_uid):
                     return False
             elif project.source.kind == "file":
                 if not self.open_file_path(src):

@@ -63,6 +63,16 @@ def test_load_wrong_version_raises(tmp_path):
         load_project(p)
 
 
+def test_source_settings_round_trips_series_uid(tmp_path):
+    p = tmp_path / "with_series.dcmproj"
+    project = Project(
+        source=SourceSettings(kind="folder", path="/data/x", series_uid="1.2.3.4.5"),
+    )
+    save_project(p, project)
+    loaded = load_project(p)
+    assert loaded.source.series_uid == "1.2.3.4.5"
+
+
 def test_load_ignores_unknown_keys(tmp_path):
     p = tmp_path / "extras.dcmproj"
     p.write_text(

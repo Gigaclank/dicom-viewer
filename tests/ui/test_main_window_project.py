@@ -61,6 +61,52 @@ def test_save_project_records_last_project_pointer(qtbot, tmp_path):
     assert load_last_project() == proj_path
 
 
+def test_series_combo_populated_after_loading_multi_series_folder(qtbot, tmp_path):
+    """Loading a folder with several series populates the toolbar dropdown,
+    and switching the dropdown changes the active study without reloading."""
+    from tests.fixtures.make_synthetic_series import make_synthetic_mr_series
+
+    make_synthetic_ct_series(tmp_path, shape=(3, 4, 4))
+    make_synthetic_mr_series(tmp_path, shape=(3, 4, 4))
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.open_folder_path(tmp_path)
+
+    # Both series live in the dropdown.
+    assert win.series_combo.count() == 2
+    assert win.series_combo.isEnabled()
+    initial_uid = win.document.study.series_uid
+
+    # Pick the other series; the document's active study should change.
+    other_idx = 1 if win.series_combo.currentIndex() == 0 else 0
+    win.series_combo.setCurrentIndex(other_idx)
+    assert win.document.study.series_uid != initial_uid
+
+
+def test_project_remembers_active_series_uid(qtbot, tmp_path):
+    """Saving a project then loading it must restore the same active series."""
+    from tests.fixtures.make_synthetic_series import make_synthetic_mr_series
+
+    make_synthetic_ct_series(tmp_path, shape=(3, 4, 4))
+    make_synthetic_mr_series(tmp_path, shape=(3, 4, 4))
+    project_path = tmp_path / f"proj{PROJECT_EXTENSION}"
+
+    win1 = MainWindow()
+    qtbot.addWidget(win1)
+    assert win1.open_folder_path(tmp_path)
+    # Switch to whichever series is "second" in the dropdown.
+    second_idx = 1 if win1.series_combo.currentIndex() == 0 else 0
+    win1.series_combo.setCurrentIndex(second_idx)
+    expected_uid = win1.document.study.series_uid
+    save_project(project_path, win1.collect_project())
+
+    win2 = MainWindow()
+    qtbot.addWidget(win2)
+    assert win2.load_project_from_path(project_path)
+    assert win2.document.study.series_uid == expected_uid
+
+
 def test_load_corrupt_project_does_not_crash(qtbot, tmp_path, monkeypatch):
     bad = tmp_path / f"bad{PROJECT_EXTENSION}"
     bad.write_text("not even json", encoding="utf-8")
