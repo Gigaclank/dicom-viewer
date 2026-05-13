@@ -55,3 +55,33 @@ Both rely on certs stored as GitHub Actions secrets.
 
 If PyInstaller misses a module at runtime, add it to `hiddenimports` in
 `dicom-viewer.spec`.
+
+## torch wheel choice
+
+The release workflow installs the **CPU-only torch wheel** before building:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+Reasons:
+
+- Default pip installs torch with bleeding-edge CUDA bundles (~2 GB on disk,
+  ~1 GB worth of `nvidia-*` wheels) — most users running a 3D viewer don't
+  have a matching NVIDIA driver, and any GPU code path crashes at native
+  level the moment a tensor is moved to CUDA. MedSAM defaults to CPU at
+  runtime anyway, so the GPU runtime is dead weight in the installer.
+- The recent torch + CUDA 13 wheel chain has shipped broken NCCL stubs that
+  fail to load (`undefined symbol: ncclCommResume`) on machines without
+  the matching CUDA runtime. The CPU wheel sidesteps the whole chain.
+
+If you're developing locally and `MedSAMSegmenter.is_available()` returns
+False, your venv probably has the GPU wheel. Switch with:
+
+```bash
+.venv/bin/pip uninstall -y torch
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+For users who DO have CUDA and want GPU acceleration, install the matching
+CUDA wheel themselves and set `DICOM_VIEWER_MEDSAM_CUDA=1` at runtime.

@@ -18,14 +18,14 @@ dependencies = [
     # default so the shipped installers include the feature out-of-the-box.
     # Model weights (~360MB) still auto-download from HuggingFace on first use.
     #
-    # torch is pinned to a CUDA-12-era wheel range. Newer torch wheels bundle
-    # CUDA 13 runtimes that very few user machines have drivers for; the
-    # mismatch core-dumps the process the moment torch initialises a CUDA
-    # context. The runtime defaults to CPU regardless, but installing an
-    # older wheel also keeps the installer smaller and avoids surprises for
-    # users who set DICOM_VIEWER_MEDSAM_CUDA=1.
-    # transformers 4.x and 5.x are both API-compatible for SAM here.
-    "torch>=2.1,<2.5",
+    # No upper bounds: forcing torch<2.5 turned out to be too aggressive —
+    # transformers 5.x depends on torch.library schema APIs that only exist
+    # in torch>=2.5, so the pin caused a hard import-time failure
+    # ("infer_schema(func): Parameter input has unsupported type torch.Tensor").
+    # Letting pip pick the current pair (recent torch + current transformers)
+    # is the safest default; CUDA-mismatch crashes are now prevented at
+    # runtime by defaulting to CPU regardless of which wheel got installed.
+    "torch>=2.1",
     "transformers>=4.40",
     "pillow>=10.0",
 ]

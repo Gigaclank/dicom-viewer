@@ -38,6 +38,9 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          # CPU-only torch wheel — bundled installers don't ship a CUDA
+          # runtime, and the GPU wheels are ~10x bigger.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]" pyinstaller
 
       - name: Bundle with PyInstaller
@@ -107,6 +110,9 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          # CPU-only torch wheel — bundled installers don't ship a CUDA
+          # runtime, and the GPU wheels are ~10x bigger.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]" pyinstaller
 
       - name: Bundle with PyInstaller
@@ -150,6 +156,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]" pyinstaller dmgbuild
 
       - name: Bundle with PyInstaller
