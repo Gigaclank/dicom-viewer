@@ -20,6 +20,10 @@ class VolumeRenderer:
         self._overlay_actor: vtk.vtkActor | None = None
         self._region_actor: vtk.vtkActor | None = None
         self._render_window: vtk.vtkRenderWindow | None = None
+        # Cache the most recently set mask + region so that updates to either
+        # one re-render the overlay surface with the correct crop.
+        self._latest_mask: np.ndarray | None = None
+        self._region: Region | None = None
 
         if os.environ.get("DICOM_VIEWER_OFFSCREEN") == "1":
             rw = vtk.vtkRenderWindow()
@@ -69,6 +73,10 @@ class VolumeRenderer:
         self._renderer.ResetCamera()
 
     def set_region(self, region: Region) -> None:
+        self._region = region
+        # Re-apply the overlay mask so the surface re-crops to the new region.
+        if self._latest_mask is not None:
+            self.set_overlay_mask(self._latest_mask)
         if self._region_actor is not None:
             self._renderer.RemoveActor(self._region_actor)
             self._region_actor = None
@@ -95,12 +103,31 @@ class VolumeRenderer:
         self._region_actor = actor
 
     def set_overlay_mask(self, mask: np.ndarray | None) -> None:
+        """When a mask is set, hide the volume render and show ONLY the masked
+        surface (cropped to the active region if one is set). This makes the 3D
+        pane a live preview of what the STL export will look like. When the
+        mask is cleared, the volume render comes back."""
+        self._latest_mask = mask
         if self._overlay_actor is not None:
             self._renderer.RemoveActor(self._overlay_actor)
             self._overlay_actor = None
+
         if mask is None or self._volume is None or not mask.any():
+            if self._volume_actor is not None:
+                self._volume_actor.SetVisibility(True)
             return
-        image = _mask_to_vtk_image(mask, self._volume.spacing_mm)
+
+        # Hide the underlying volume render so the surface shows clearly.
+        if self._volume_actor is not None:
+            self._volume_actor.SetVisibility(False)
+
+        # Crop the mask to the active region if one is set — matches what the
+        # STL pipeline does, so the preview reflects the actual export.
+        cropped = self._crop_mask_to_region(mask)
+        if not cropped.any():
+            return
+
+        image = _mask_to_vtk_image(cropped, self._volume.spacing_mm)
         mc = vtk.vtkDiscreteMarchingCubes()
         mc.SetInputData(image)
         mc.SetValue(0, 1)
@@ -109,10 +136,22 @@ class VolumeRenderer:
         mapper.SetInputConnection(mc.GetOutputPort())
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(0.95, 0.3, 0.3)
-        actor.GetProperty().SetOpacity(0.6)
+        actor.GetProperty().SetColor(0.85, 0.85, 0.9)
         self._renderer.AddActor(actor)
         self._overlay_actor = actor
+
+    def _crop_mask_to_region(self, mask: np.ndarray) -> np.ndarray:
+        if self._volume is None:
+            return mask
+        bounds = self._volume.bbox()
+        r = (self._region or bounds).clamp_to(bounds)
+        if r.is_empty:
+            return np.zeros_like(mask)
+        cropped = np.zeros_like(mask)
+        cropped[r.z[0] : r.z[1], r.y[0] : r.y[1], r.x[0] : r.x[1]] = mask[
+            r.z[0] : r.z[1], r.y[0] : r.y[1], r.x[0] : r.x[1]
+        ]
+        return cropped
 
     def render(self) -> None:
         if self._render_window is not None:
