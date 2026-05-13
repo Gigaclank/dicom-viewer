@@ -150,6 +150,62 @@ def test_loader_progress_callback_failure_does_not_break_load(tmp_path):
     assert len(result.studies) == 1
 
 
+def test_folder_loads_2d_files_without_image_position_patient(tmp_path):
+    """Mammograms and other 2D modalities don't carry ImagePositionPatient.
+    The folder loader must still pick them up as standalone one-slice studies
+    rather than skipping them as 'incomplete'."""
+    import numpy as np
+    import pydicom
+    from pydicom.dataset import FileDataset, FileMetaDataset
+    from pydicom.uid import DigitalMammographyXRayImageStorageForPresentation
+    from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+
+    folder = tmp_path / "mg"
+    folder.mkdir()
+
+    def write_mg(name: str, rows: int, cols: int, laterality: str, view: str) -> None:
+        sop_uid = DigitalMammographyXRayImageStorageForPresentation
+        file_meta = FileMetaDataset()
+        file_meta.MediaStorageSOPClassUID = sop_uid
+        file_meta.MediaStorageSOPInstanceUID = generate_uid()
+        file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds = FileDataset(str(folder / name), {}, file_meta=file_meta, preamble=b"\0" * 128)
+        ds.SOPClassUID = sop_uid
+        ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+        ds.SeriesInstanceUID = generate_uid()
+        ds.StudyInstanceUID = generate_uid()
+        ds.Modality = "MG"
+        ds.PatientID = "P"
+        ds.PatientName = "Test"
+        ds.Rows, ds.Columns = rows, cols
+        ds.BitsAllocated = 16
+        ds.BitsStored = 16
+        ds.HighBit = 15
+        ds.PixelRepresentation = 0
+        ds.SamplesPerPixel = 1
+        ds.PhotometricInterpretation = "MONOCHROME2"
+        ds.ImageLaterality = laterality
+        ds.ViewPosition = view
+        ds.PixelData = np.zeros((rows, cols), dtype=np.uint16).tobytes()
+        # NOTE: deliberately no ImagePositionPatient or ImageOrientationPatient.
+        ds.save_as(folder / name, enforce_file_format=True)
+
+    write_mg("0250.LEFT_CC.dcm", 64, 32, "L", "CC")
+    write_mg("0250.LEFT_MLO.dcm", 64, 32, "L", "MLO")
+    write_mg("0250.RIGHT_CC.dcm", 64, 32, "R", "CC")
+    write_mg("0250.RIGHT_MLO.dcm", 64, 32, "R", "MLO")
+
+    result = load_series_from_folder(folder)
+    assert len(result.studies) == 4
+    assert result.skipped_incomplete == 0
+    # Display names must be distinct so the user can pick a view.
+    names = {s.display_name for s in result.studies}
+    assert len(names) == 4
+    # All should have stem in the name — filename is the reliable identifier.
+    for s in result.studies:
+        assert "0250." in s.display_name
+
+
 def test_load_folder_skips_a_broken_series_keeps_good_ones(tmp_path):
     """A pathological series shouldn't take down the whole folder load."""
     import pydicom

@@ -71,7 +71,11 @@ def load_series_from_folder(
     all_files = [p for p in folder.rglob("*") if p.is_file()]
     total_files = max(1, len(all_files))
 
+    # 3D series (slices share an IPP-based stacking axis) go into `groups`.
+    # 2D images (no IPP — mammograms, plain X-rays, single MR localizers...)
+    # go into `singletons` and become one-slice studies each.
     groups: dict[str, list[pydicom.Dataset]] = defaultdict(list)
+    singletons: list[pydicom.Dataset] = []
     skipped_non_dicom = 0
     skipped_incomplete = 0
 
@@ -81,25 +85,26 @@ def load_series_from_folder(
         except (InvalidDicomError, OSError):
             skipped_non_dicom += 1
             continue
-        try:
-            uid = str(ds.SeriesInstanceUID)
-            _ = ds.PixelData  # ensure present
-            _ = ds.ImagePositionPatient
-        except AttributeError:
+        if not hasattr(ds, "PixelData"):
             skipped_incomplete += 1
             continue
-        groups[uid].append(ds)
+        if hasattr(ds, "ImagePositionPatient"):
+            uid = str(getattr(ds, "SeriesInstanceUID", "") or path.stem)
+            groups[uid].append(ds)
+        else:
+            singletons.append(ds)
         # Report progress roughly every 25 files (and at the end).
         if i % 25 == 0 or i == total_files - 1:
             report(f"Scanning ({i + 1}/{total_files})", 0.10 * (i + 1) / total_files)
 
     # --- phase 2: assemble each series ------------------------------------
     studies: list[Study] = []
-    n_groups = max(1, len(groups))
-    for g_idx, (uid, datasets) in enumerate(groups.items()):
-        # Per-series progress slice — series of equal size get equal share.
-        base = 0.10 + 0.85 * (g_idx / n_groups)
-        slice_width = 0.85 / n_groups
+    # Total assembly units = stacked series + standalone 2D files.
+    n_units = max(1, len(groups) + len(singletons))
+    unit_idx = 0
+    for uid, datasets in groups.items():
+        base = 0.10 + 0.85 * (unit_idx / n_units)
+        slice_width = 0.85 / n_units
 
         def per_series_progress(stage: str, frac: float, _base=base, _w=slice_width) -> None:
             report(stage, _base + _w * frac)
@@ -108,13 +113,24 @@ def load_series_from_folder(
             study = _assemble_series(datasets, progress=per_series_progress)
         except _IncompleteSeries:
             skipped_incomplete += len(datasets)
-            continue
         except Exception:
             # One pathological series (decoding failure, mismatched frames,
             # etc.) must not abort loading the rest of the folder.
             skipped_incomplete += len(datasets)
-            continue
-        studies.append(study)
+        else:
+            studies.append(study)
+        unit_idx += 1
+
+    for ds in singletons:
+        base = 0.10 + 0.85 * (unit_idx / n_units)
+        try:
+            study = _assemble_single(ds)
+        except Exception:
+            skipped_incomplete += 1
+        else:
+            studies.append(study)
+        report("Reading 2D image", base + 0.85 / n_units)
+        unit_idx += 1
 
     if not studies:
         raise LoaderError(
@@ -194,13 +210,28 @@ def _assemble_single(ds: pydicom.Dataset) -> Study:
         spacing_mm=(z_spacing, py, px),
         modality=modality,
     )
+    # For 2D modalities (mammography, plain X-rays, …) the SeriesDescription
+    # is often the same across every view in the folder, so the user can't
+    # tell views apart in the dropdown. We always include the source filename
+    # stem (the most reliable distinguishing label for ad-hoc DICOM dumps),
+    # and append laterality / view tags when they're present and meaningful.
+    description = str(getattr(ds, "SeriesDescription", "") or "").strip()
+    fname = str(getattr(ds, "filename", "") or "")
+    stem = Path(fname).stem if fname else ""
+    if stem:
+        description = f"{description} — {stem}" if description else stem
+    laterality = str(getattr(ds, "ImageLaterality", "") or "").strip()
+    view = str(getattr(ds, "ViewPosition", "") or "").strip()
+    tag_bits = [b for b in (laterality, view) if b]
+    if tag_bits:
+        description = f"{description} [{' '.join(tag_bits)}]"
     return Study(
         volume=volume,
         patient_id=str(getattr(ds, "PatientID", "")),
         patient_name=str(getattr(ds, "PatientName", "")),
         study_uid=str(getattr(ds, "StudyInstanceUID", "")),
         series_uid=str(getattr(ds, "SeriesInstanceUID", "")),
-        series_description=str(getattr(ds, "SeriesDescription", "")),
+        series_description=description,
         orientation_cosines=iop,
     )
 
