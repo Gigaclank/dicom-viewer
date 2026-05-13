@@ -66,6 +66,27 @@ def test_volume_renderer_reset_view_without_volume_does_not_crash():
     VolumeRenderer().reset_view()  # no scene yet — must not raise
 
 
+def test_loading_a_new_volume_uses_default_orientation_not_inherited_rotation():
+    """Each new volume must start from the same anatomical-anterior pose; the
+    rotation the user left on the previous volume must not bleed into the
+    home camera captured for the next volume."""
+    r = VolumeRenderer()
+    r.set_volume(_vol())
+
+    cam = r._renderer.GetActiveCamera()
+    # Simulate the user rotating the 3D camera arbitrarily.
+    cam.SetViewUp(1.0, 1.0, 0.0)
+    cam.Azimuth(45)
+    rotated_view_up = cam.GetViewUp()
+    assert rotated_view_up != (0.0, 0.0, 1.0)
+
+    # Loading another volume must snap the camera back to (Z-up, anterior).
+    r.set_volume(_vol())
+    assert r._renderer.GetActiveCamera().GetViewUp() == (0.0, 0.0, 1.0)
+    # And the captured home reflects that, not the rotated state.
+    assert r._home_view_up == (0.0, 0.0, 1.0)
+
+
 def test_overlay_mask_hides_volume_and_shows_surface():
     r = VolumeRenderer()
     r.set_volume(_vol())

@@ -77,6 +77,14 @@ class VolumeRenderer:
         actor.SetProperty(prop)
         self._renderer.AddVolume(actor)
         self._volume_actor = actor
+        # Set a known default orientation BEFORE letting ResetCamera fit the
+        # scene. ResetCamera preserves view direction and view-up, so without
+        # this any rotation the user did on the previous volume would carry
+        # over to the new one (and then get captured as that volume's "home").
+        cam = self._renderer.GetActiveCamera()
+        cam.SetPosition(0.0, -1.0, 0.0)  # looking anteriorly (-Y)
+        cam.SetFocalPoint(0.0, 0.0, 0.0)
+        cam.SetViewUp(0.0, 0.0, 1.0)     # Z is up
         self._renderer.ResetCamera()
         self._capture_home_camera()
 

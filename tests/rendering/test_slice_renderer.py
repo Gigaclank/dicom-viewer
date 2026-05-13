@@ -66,6 +66,22 @@ def test_overlay_refreshes_when_slice_index_changes():
     assert sum_at_4 == 0   # slice 4 has no mask -> alpha all zero
 
 
+def test_set_volume_auto_resets_camera_view_up():
+    """Loading a new volume must snap zoom/orientation back to default — any
+    zoom/pan from the previous volume should NOT carry over."""
+    r = SliceRenderer(orientation=Orientation.AXIAL)
+    r.set_volume(_vol())
+    cam = r._renderer.GetActiveCamera()
+    # Mess with the camera as if the user dragged it.
+    cam.SetViewUp(1.0, 0.0, 0.0)
+    cam.Zoom(3.0)
+    assert cam.GetViewUp() != (0.0, 1.0, 0.0)
+
+    # Loading another volume must restore the default view-up.
+    r.set_volume(_vol())
+    assert cam.GetViewUp() == (0.0, 1.0, 0.0)
+
+
 def test_scroll_does_not_crash_when_mask_shape_predates_volume_swap():
     """Regression: when a new (larger) volume is set but the previous mask is
     still cached (no segmentation event has fired yet), scrolling past the

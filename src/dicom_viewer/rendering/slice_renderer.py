@@ -55,6 +55,9 @@ class SliceRenderer:
         max_index = self._max_index()
         self._index = min(self._index, max_index)
         self._refresh_image()
+        # Each new volume gets a fresh, centred default view — otherwise any
+        # zoom/pan the user left from the previous volume would carry over.
+        self.reset_view()
 
     def set_slice_index(self, index: int) -> None:
         if self._volume is None:
