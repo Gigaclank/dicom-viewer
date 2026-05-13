@@ -66,6 +66,25 @@ def test_overlay_refreshes_when_slice_index_changes():
     assert sum_at_4 == 0   # slice 4 has no mask -> alpha all zero
 
 
+def test_scroll_does_not_crash_when_mask_shape_predates_volume_swap():
+    """Regression: when a new (larger) volume is set but the previous mask is
+    still cached (no segmentation event has fired yet), scrolling past the
+    old mask's z extent crashed with IndexError. The renderer should drop
+    the mismatched mask instead."""
+    r = SliceRenderer(orientation=Orientation.AXIAL)
+    small = Volume(array=np.zeros((4, 4, 4), dtype=np.int16), spacing_mm=(1, 1, 1), modality="CT")
+    big = Volume(array=np.zeros((20, 4, 4), dtype=np.int16), spacing_mm=(1, 1, 1), modality="CT")
+    r.set_volume(small)
+    mask = np.zeros(small.shape, dtype=bool)
+    mask[1, :, :] = True
+    r.set_overlay_mask(mask)
+    # Now swap to the bigger volume WITHOUT updating the mask.
+    r.set_volume(big)
+    # Scrolling past the small mask's z extent must not crash.
+    r.set_slice_index(15)
+    assert r.current_index == 15
+
+
 def test_slice_renderer_reset_view_restores_default_camera():
     r = SliceRenderer(orientation=Orientation.AXIAL)
     r.set_volume(_vol())

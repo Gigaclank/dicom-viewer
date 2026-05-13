@@ -32,6 +32,23 @@ def test_set_study_notifies_observers():
     assert doc.volume is not None
 
 
+def test_set_study_emits_segmentation_so_stale_masks_clear():
+    """Regression: switching DCMs left the old segmentation mask cached in
+    slice renderers because no 'segmentation' event was emitted, causing an
+    IndexError when the new volume had different shape and the user scrolled
+    into a slice the old mask didn't cover."""
+    doc = Document()
+    doc.set_study(_study())
+    seg = threshold(doc.volume, low=100, high=1000)
+    doc.set_segmentation(seg)
+    events: list[str] = []
+    doc.subscribe(lambda kind: events.append(kind))
+    # Loading a new study must signal observers that the segmentation is gone.
+    doc.set_study(_study())
+    assert "segmentation" in events
+    assert doc.segmentation is None
+
+
 def test_set_segmentation_notifies():
     doc = Document()
     doc.set_study(_study())

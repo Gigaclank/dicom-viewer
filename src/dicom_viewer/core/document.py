@@ -82,6 +82,10 @@ class Document:
         self._emit("volume")
         self._emit("region")
         self._emit("windowing")
+        # The segmentation was reset to None above; emit so observers (slice
+        # views' overlay actors, the 3D pane) drop their stale mask references
+        # before they're ever asked to render against the new volume.
+        self._emit("segmentation")
 
     def set_segmentation(self, seg: Segmentation | None) -> None:
         self._segmentation = seg

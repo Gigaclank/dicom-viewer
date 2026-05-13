@@ -112,6 +112,13 @@ class SliceRenderer:
         if self._volume is None or self._overlay_mask is None:
             self._overlay_actor.SetInputData(_empty_image())
             return
+        # Defensive: if the cached mask doesn't match the current volume's
+        # shape (e.g. mid-transition while switching DICOMs), drop it rather
+        # than slicing it out of bounds. The next set_overlay_mask call will
+        # install a correctly-shaped mask.
+        if self._overlay_mask.shape != self._volume.shape:
+            self._overlay_actor.SetInputData(_empty_image())
+            return
         # Slice the mask the same way the volume is sliced.
         mask_volume = Volume(
             array=self._overlay_mask.astype(np.uint8),
