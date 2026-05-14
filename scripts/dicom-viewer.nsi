@@ -15,7 +15,10 @@
 !define APP_KEY        "${APP_NAME}"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "dist\dicom-viewer-${APP_VERSION}-setup.exe"
+; OutFile + File are resolved relative to the .nsi file's directory (scripts\),
+; not the CWD that invoked makensis. Step up one level so we read PyInstaller's
+; output and drop the installer in the repo-root dist\ that CI uploads from.
+OutFile "..\dist\dicom-viewer-${APP_VERSION}-setup.exe"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 InstallDirRegKey HKLM "Software\${APP_KEY}" "InstallDir"
 RequestExecutionLevel admin
@@ -45,7 +48,7 @@ Section "${APP_NAME} (required)" SecCore
     SectionIn RO
     SetOutPath "$INSTDIR"
     ; PyInstaller --onedir output. /r recurses into the whole tree.
-    File /r "dist\dicom-viewer\*.*"
+    File /r "..\dist\dicom-viewer\*.*"
 
     ; Start Menu shortcut.
     CreateDirectory "$SMPROGRAMS\${APP_NAME}"
