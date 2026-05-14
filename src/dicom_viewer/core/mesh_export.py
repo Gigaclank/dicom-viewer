@@ -42,19 +42,36 @@ class EmptyMeshError(Exception):
     """The chosen segmentation/region intersection produced zero voxels or zero triangles."""
 
 
+def iso_threshold_for_view(volume: Volume) -> float:
+    """Intensity threshold at which the 3D view's transfer function makes
+    the surface visibly opaque. Single source of truth used by BOTH the 3D
+    volume renderer's opacity ramp AND the STL iso-surface fallback, so the
+    STL matches what's on screen ('what you see is what you get').
+
+    Per-modality reasoning:
+    - CT: 300 HU is the classic bone threshold, also the lower-edge of the
+      opacity ramp in VolumeRenderer's CT transfer function.
+    - MR / unknown: 30% into the volume's measured intensity range — matches
+      where VolumeRenderer's generic transfer function starts ramping.
+    """
+    if volume.modality == "CT":
+        return 300.0
+    lo, hi = volume.intensity_range()
+    return lo + (hi - lo) * 0.30
+
+
 def resolve_export_segmentation(
     volume: Volume,
     segmentation: "Segmentation | None",
-    iso_value: float,
 ) -> "tuple[Segmentation, str]":
     """Pick the mask to mesh for STL export or preview.
 
-    If a user-applied segmentation is present, use it. Otherwise fabricate a
-    one-shot iso-surface mask by thresholding above `iso_value` (typically
-    the active windowing center). Returns (segmentation, label) where
-    `label` is `'user-segmentation'` or `'iso@<value>'` for UI display.
+    If a user-applied segmentation is present, use it. Otherwise build the
+    iso-surface mask at `iso_threshold_for_view(volume)` — the same surface
+    visible in the 3D view. Returns (segmentation, label) where `label` is
+    `'user-segmentation'` or `'iso@<value>'` for UI display.
 
-    Raises EmptyMeshError if neither path produces any voxels.
+    Raises EmptyMeshError if the resulting mask is empty.
     """
     # Local import to avoid module-load cycle with segmentation.threshold ->
     # segmentation.base -> mesh_export (this module).
@@ -63,12 +80,13 @@ def resolve_export_segmentation(
     if segmentation is not None:
         return segmentation, "user-segmentation"
 
+    iso_value = iso_threshold_for_view(volume)
     _, hi = volume.intensity_range()
     iso_seg = threshold(volume, iso_value, max(hi, iso_value))
     if iso_seg.is_empty:
         raise EmptyMeshError(
             f"iso-surface at intensity {iso_value:.0f} selected zero voxels — "
-            f"adjust windowing to a brightness threshold that includes the target."
+            f"the volume's intensity range may not match the expected modality."
         )
     return iso_seg, f"iso@{iso_value:.0f}"
 

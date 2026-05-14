@@ -61,19 +61,23 @@ class VolumeRenderer:
         prop = vtk.vtkVolumeProperty()
         opacity = vtk.vtkPiecewiseFunction()
         color = vtk.vtkColorTransferFunction()
+        # The opacity ramp's lower edge IS the iso threshold the STL export
+        # uses, so 'what you see is what you get'. Single source of truth in
+        # core.mesh_export.iso_threshold_for_view.
+        from dicom_viewer.core.mesh_export import iso_threshold_for_view
+        iso = iso_threshold_for_view(volume)
+        lo, hi = volume.intensity_range()
         if volume.modality == "CT":
-            # bone-emphasizing transfer function
-            opacity.AddPoint(-1000, 0.0)
-            opacity.AddPoint(150, 0.0)
-            opacity.AddPoint(300, 0.5)
-            opacity.AddPoint(1500, 0.9)
-            color.AddRGBPoint(150, 0.4, 0.2, 0.1)
-            color.AddRGBPoint(300, 0.9, 0.8, 0.7)
-            color.AddRGBPoint(1500, 1.0, 1.0, 1.0)
+            opacity.AddPoint(lo - 1, 0.0)
+            opacity.AddPoint(iso - 1, 0.0)
+            opacity.AddPoint(iso, 0.5)
+            opacity.AddPoint(max(hi, iso + 1), 0.9)
+            color.AddRGBPoint(iso - 1, 0.4, 0.2, 0.1)
+            color.AddRGBPoint(iso, 0.9, 0.8, 0.7)
+            color.AddRGBPoint(max(hi, iso + 1), 1.0, 1.0, 1.0)
         else:
-            lo, hi = volume.intensity_range()
             opacity.AddPoint(lo, 0.0)
-            opacity.AddPoint(lo + (hi - lo) * 0.3, 0.05)
+            opacity.AddPoint(iso, 0.05)
             opacity.AddPoint(hi, 0.8)
             color.AddRGBPoint(lo, 0.1, 0.1, 0.2)
             color.AddRGBPoint(hi, 1.0, 1.0, 1.0)

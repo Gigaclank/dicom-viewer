@@ -62,9 +62,7 @@ class _ExportWorker(QThread):
             if volume is None:
                 raise EmptyMeshError("no volume loaded")
             seg, _label = resolve_export_segmentation(
-                volume,
-                self._document.segmentation,
-                float(self._document.windowing.center),
+                volume, self._document.segmentation
             )
             region = self._document.region or volume.bbox()
             mesh = generate_mesh(
@@ -277,7 +275,7 @@ class ExportPanel(QWidget):
             ensure_manifold=self.manifold_checkbox.isChecked(),
         )
 
-    # --- project file integration ---
+# --- project file integration ---
     def get_settings(self) -> ExportSettings:
         return ExportSettings(
             smoothing_iterations=self.smoothing_slider.value(),

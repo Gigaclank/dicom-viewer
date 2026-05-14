@@ -159,10 +159,6 @@ class MeshPreviewView(QWidget):
             self.schedule_refresh()
         elif kind in ("segmentation", "region"):
             self.schedule_refresh()
-        elif kind == "windowing" and self._document.segmentation is None:
-            # In iso-surface mode the windowing center IS the threshold, so
-            # changing windowing should retrigger the mesh.
-            self.schedule_refresh()
 
     def _maybe_run_worker(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -178,12 +174,11 @@ class MeshPreviewView(QWidget):
             return
         # Use the same resolution logic as the STL export: if the user has
         # applied a segmentation, mesh that. Otherwise mesh the iso-surface
-        # at the active windowing center — same as 'Export STL' would do.
+        # at the modality-aware threshold the 3D view also uses — so the
+        # preview (and the exported STL) matches what the 3D pane shows.
         try:
             seg, label = resolve_export_segmentation(
-                volume,
-                self._document.segmentation,
-                float(self._document.windowing.center),
+                volume, self._document.segmentation
             )
         except EmptyMeshError as e:
             self._preview.set_mesh(None)
