@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dicom_viewer.core.document import Document
+from dicom_viewer.core.document import Document, WindowingState
 from dicom_viewer.core.segmentation.threshold import threshold
 from dicom_viewer.core.study import Study
 from dicom_viewer.core.volume import Volume
@@ -27,18 +27,66 @@ def _doc_with_segmentation() -> Document:
     return doc
 
 
-def test_export_panel_disabled_without_segmentation(qtbot):
+def _doc_without_segmentation() -> Document:
+    arr = np.zeros((16, 16, 16), dtype=np.int16)
+    arr[4:12, 4:12, 4:12] = 1000
+    v = Volume(array=arr, spacing_mm=(1.0, 1.0, 1.0), modality="CT")
+    study = Study(
+        volume=v,
+        patient_id="P",
+        patient_name="N",
+        study_uid="s",
+        series_uid="se",
+        series_description="cube",
+        orientation_cosines=(1, 0, 0, 0, 1, 0),
+    )
+    doc = Document()
+    doc.set_study(study)
+    # No segmentation; set window center to 500 so iso-surface captures the cube.
+    doc.set_windowing(WindowingState(center=500.0, width=1000.0))
+    return doc
+
+
+def test_export_button_disabled_without_volume(qtbot):
     doc = Document()
     panel = ExportPanel(doc)
     qtbot.addWidget(panel)
     assert not panel.export_button.isEnabled()
+    assert not panel.export_nifti_button.isEnabled()
 
 
-def test_export_panel_enabled_with_segmentation(qtbot):
+def test_export_button_enabled_with_volume_only(qtbot):
+    """STL export should work even without a segmentation — it falls back to
+    the windowing-center iso-surface."""
+    doc = _doc_without_segmentation()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    assert panel.export_button.isEnabled()
+    # NIfTI mask export still requires a real segmentation.
+    assert not panel.export_nifti_button.isEnabled()
+
+
+def test_export_button_enabled_with_segmentation(qtbot):
     doc = _doc_with_segmentation()
     panel = ExportPanel(doc)
     qtbot.addWidget(panel)
     assert panel.export_button.isEnabled()
+    assert panel.export_nifti_button.isEnabled()
+
+
+def test_export_without_segmentation_uses_iso_surface(qtbot, tmp_path):
+    """Without a user segmentation, run_export should still produce a valid
+    binary STL by meshing the iso-surface at the active windowing center."""
+    doc = _doc_without_segmentation()
+    panel = ExportPanel(doc)
+    qtbot.addWidget(panel)
+    out = tmp_path / "iso.stl"
+    panel.run_export(out)
+    assert out.exists()
+    assert out.stat().st_size > 84  # header (80) + triangle-count u32 (4)
+    # Status should make it clear this was an iso-surface, not a saved mask.
+    text = panel._status.text().lower()
+    assert "iso" in text
 
 
 def test_export_writes_stl_file(qtbot, tmp_path):
