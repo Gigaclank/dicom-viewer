@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -12,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QVBoxLayout,
@@ -30,10 +32,22 @@ from dicom_viewer.ui.widgets.labeled_slider import LabeledSlider
 
 
 class SegmentationPanel(QWidget):
+    # 300 ms after the last slider/checkbox change — long enough that dragging
+    # doesn't spawn workers per pixel, short enough to feel responsive.
+    LIVE_DEBOUNCE_MS = 300
+
     def __init__(self, document: Document) -> None:
         super().__init__()
         self._document = document
         self._suppress_live = False
+        self._seg_worker: Optional["_SegmentationWorker"] = None
+
+        # Debounce live-preview triggers — slider value-changed fires per-tick,
+        # but we only want to start a worker when the user pauses.
+        self._live_debounce = QTimer(self)
+        self._live_debounce.setSingleShot(True)
+        self._live_debounce.setInterval(self.LIVE_DEBOUNCE_MS)
+        self._live_debounce.timeout.connect(self._apply_now)
 
         self.method_combo = QComboBox()
         self.method_combo.addItems(["Threshold", "Region grow"])
@@ -87,6 +101,13 @@ class SegmentationPanel(QWidget):
         self._status = QLabel("No segmentation")
         self._status.setWordWrap(True)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximumHeight(14)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setVisible(False)
+
         form = QFormLayout()
         form.addRow("Method", self.method_combo)
         form.addRow("Low", self.low_slider)
@@ -109,6 +130,7 @@ class SegmentationPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(buttons)
+        layout.addWidget(self.progress_bar)
         layout.addWidget(self._status)
 
         document.subscribe(self._on_doc_event)
@@ -123,7 +145,9 @@ class SegmentationPanel(QWidget):
             return
         if self.method_combo.currentText() != "Threshold":
             return
-        self._apply_now()
+        # Restart the debounce on every change so we only fire after the user
+        # has been still for LIVE_DEBOUNCE_MS — no per-tick worker spawning.
+        self._live_debounce.start()
 
     def _on_method_changed(self, _text: str) -> None:
         # Method switch is also a moment to refresh the live preview if eligible.
@@ -219,26 +243,76 @@ class SegmentationPanel(QWidget):
         self._apply_now()
 
     def _apply_now(self) -> None:
+        """Start a worker-thread segmentation run. If a worker is already in
+        flight, request its interruption and start a fresh one — the old
+        worker's result (if it finishes anyway) is discarded by an identity
+        check in _on_seg_ready."""
         volume = self._document.volume
         if volume is None:
             return
         method = self.method_combo.currentText()
-        if method == "Threshold":
-            lo, hi = self.low_slider.value(), self.high_slider.value()
-            if hi < lo:
-                return  # ignore invalid range; user is mid-drag
-            seg = threshold(volume, lo, hi)
-        else:
-            seg = region_grow(
-                volume,
-                seed=(self.seed_z.value(), self.seed_y.value(), self.seed_x.value()),
-                tolerance=self.tolerance_slider.value(),
-            )
-        if self.largest_component_checkbox.isChecked():
-            seg = keep_largest_component(seg)
-        if self.smooth_checkbox.isChecked():
-            seg = smooth_mask(seg, iterations=1)
+        lo, hi = self.low_slider.value(), self.high_slider.value()
+        if method == "Threshold" and hi < lo:
+            return  # invalid range; user is mid-drag
+
+        # Cancel any in-flight worker. We don't .wait() because the current
+        # stage (smooth/largest_component) can't be interrupted mid-call;
+        # the worker checks isInterruptionRequested between stages and bails.
+        # Either way we replace the reference so the stale result gets
+        # rejected on arrival.
+        if self._seg_worker is not None and self._seg_worker.isRunning():
+            self._seg_worker.requestInterruption()
+
+        worker = _SegmentationWorker(
+            volume=volume,
+            method=method,
+            threshold_lo=lo,
+            threshold_hi=hi,
+            seed=(self.seed_z.value(), self.seed_y.value(), self.seed_x.value()),
+            tolerance=self.tolerance_slider.value(),
+            keep_largest=self.largest_component_checkbox.isChecked(),
+            smooth=self.smooth_checkbox.isChecked(),
+        )
+        worker.progress.connect(self._on_seg_progress)
+        worker.finished_ok.connect(self._on_seg_ready)
+        worker.failed.connect(self._on_seg_failed)
+
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Starting… %p%")
+        self.progress_bar.setVisible(True)
+
+        self._seg_worker = worker
+        worker.start()
+
+    def run_apply_blocking(self, timeout_ms: int = 120_000) -> None:
+        """Run _apply_now and wait for completion. Used by apply_settings
+        (project load) and tests that need a deterministic state."""
+        self._apply_now()
+        if self._seg_worker is None:
+            return
+        self._seg_worker.wait(timeout_ms)
+        # Drain queued signals so finished_ok / failed slots run before we
+        # return to the caller.
+        QCoreApplication.processEvents()
+
+    # --- worker callbacks ---
+    def _on_seg_progress(self, stage: str, fraction: float) -> None:
+        self.progress_bar.setFormat(f"{stage} — %p%")
+        self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+
+    def _on_seg_ready(self, worker: "_SegmentationWorker", seg) -> None:
+        # Only honour the latest worker's result — stale results from
+        # workers that were interrupted by a newer request are discarded.
+        if worker is not self._seg_worker:
+            return
         self._document.set_segmentation(seg)
+        self.progress_bar.setVisible(False)
+
+    def _on_seg_failed(self, worker: "_SegmentationWorker", msg: str) -> None:
+        if worker is not self._seg_worker:
+            return
+        self._status.setText(f"Apply failed: {msg}")
+        self.progress_bar.setVisible(False)
 
     # --- doc observer ---
     def _on_doc_event(self, kind: str) -> None:
@@ -289,7 +363,9 @@ class SegmentationPanel(QWidget):
         finally:
             self._suppress_live = False
         # Compute once with the loaded settings so the segmentation appears.
-        self._apply_now()
+        # Block so that callers (project load, tests) see a deterministic
+        # state on return.
+        self.run_apply_blocking()
 
     @staticmethod
     def _widen_to_fit(slider: LabeledSlider, target: int) -> None:
@@ -351,3 +427,82 @@ class _MedSAMWorker(QThread):
             self.finished_ok.emit(seg)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _SegmentationCancelled(Exception):
+    """Internal signal used by _SegmentationWorker to short-circuit between
+    pipeline stages when the panel has requested a fresh run."""
+
+
+class _SegmentationWorker(QThread):
+    """Runs threshold / region-grow plus chained refinements off the UI
+    thread, reporting progress per stage.
+
+    `finished_ok` carries `(self, segmentation)` — the panel's slot checks
+    that the worker is still the latest one before applying the result.
+    """
+
+    progress = pyqtSignal(str, float)
+    finished_ok = pyqtSignal(object, object)
+    failed = pyqtSignal(object, str)
+
+    def __init__(
+        self,
+        *,
+        volume: Volume,
+        method: str,
+        threshold_lo: int,
+        threshold_hi: int,
+        seed: tuple[int, int, int],
+        tolerance: int,
+        keep_largest: bool,
+        smooth: bool,
+    ) -> None:
+        super().__init__()
+        self._volume = volume
+        self._method = method
+        self._threshold_lo = threshold_lo
+        self._threshold_hi = threshold_hi
+        self._seed = seed
+        self._tolerance = tolerance
+        self._keep_largest = keep_largest
+        self._smooth = smooth
+
+    def _check(self) -> None:
+        if self.isInterruptionRequested():
+            raise _SegmentationCancelled()
+
+    def run(self) -> None:
+        try:
+            self._check()
+            self.progress.emit("Computing base mask", 0.05)
+            if self._method == "Threshold":
+                seg = threshold(self._volume, self._threshold_lo, self._threshold_hi)
+            else:
+                seg = region_grow(
+                    self._volume, seed=self._seed, tolerance=self._tolerance
+                )
+            self.progress.emit("Computing base mask", 0.40)
+
+            self._check()
+            if self._keep_largest:
+                self.progress.emit("Keeping largest component", 0.45)
+                seg = keep_largest_component(seg)
+                self.progress.emit("Keeping largest component", 0.70)
+
+            self._check()
+            if self._smooth:
+                self.progress.emit("Smoothing", 0.75)
+                seg = smooth_mask(seg, iterations=1)
+                self.progress.emit("Smoothing", 0.95)
+
+            self._check()
+            self.progress.emit("Done", 1.0)
+            self.finished_ok.emit(self, seg)
+        except _SegmentationCancelled:
+            # A newer request took over; silently exit. The panel discards any
+            # stale finished_ok via the identity check, but we shouldn't even
+            # emit if we caught the cancellation early.
+            return
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(self, f"{type(e).__name__}: {e}")
