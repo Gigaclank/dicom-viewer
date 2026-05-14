@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from dicom_viewer.core.document import Document
+from dicom_viewer.core.document import Document, WindowingState
 from dicom_viewer.core.segmentation.threshold import threshold
 from dicom_viewer.core.study import Study
 from dicom_viewer.core.volume import Volume
@@ -10,11 +10,11 @@ from dicom_viewer.ui.panels.export import ExportPanel
 from dicom_viewer.ui.widgets.mesh_preview_view import MeshPreviewView
 
 
-def _doc_with_segmentation() -> Document:
+def _cube_study() -> Study:
     arr = np.zeros((16, 16, 16), dtype=np.int16)
     arr[4:12, 4:12, 4:12] = 1000
     v = Volume(array=arr, spacing_mm=(1.0, 1.0, 1.0), modality="CT")
-    study = Study(
+    return Study(
         volume=v,
         patient_id="P",
         patient_name="N",
@@ -23,9 +23,23 @@ def _doc_with_segmentation() -> Document:
         series_description="cube",
         orientation_cosines=(1, 0, 0, 0, 1, 0),
     )
+
+
+def _doc_with_segmentation() -> Document:
+    study = _cube_study()
     doc = Document()
     doc.set_study(study)
-    doc.set_segmentation(threshold(v, low=500, high=2000))
+    doc.set_segmentation(threshold(study.volume, low=500, high=2000))
+    return doc
+
+
+def _doc_without_segmentation() -> Document:
+    """A document with a volume but no user-applied segmentation. Window
+    center is set so the iso-surface captures the embedded cube."""
+    study = _cube_study()
+    doc = Document()
+    doc.set_study(study)
+    doc.set_windowing(WindowingState(center=500.0, width=1000.0))
     return doc
 
 
@@ -35,7 +49,27 @@ def test_meshpreviewview_instantiates_and_idle(qtbot):
     view = MeshPreviewView(doc, panel)
     qtbot.addWidget(panel)
     qtbot.addWidget(view)
-    assert view._info_label.text() == "No segmentation yet"
+    assert view._info_label.text() == "No study loaded"
+
+
+def test_meshpreviewview_renders_iso_surface_without_segmentation(qtbot):
+    """Regression: when no user segmentation exists, the preview should still
+    render an iso-surface mesh of the volume — same fallback the STL export
+    uses — so 'export 3D view' has something to look at before saving."""
+    doc = _doc_without_segmentation()
+    panel = ExportPanel(doc)
+    view = MeshPreviewView(doc, panel)
+    qtbot.addWidget(panel)
+    qtbot.addWidget(view)
+    view.set_tab_visible(True)
+    qtbot.waitUntil(
+        lambda: "triangles" in view._info_label.text()
+        or "Mesh error" in view._info_label.text(),
+        timeout=10000,
+    )
+    text = view._info_label.text()
+    assert "triangles" in text
+    assert "iso" in text.lower()
 
 
 def test_meshpreviewview_renders_when_visible_and_segmentation_present(qtbot):
@@ -71,7 +105,7 @@ def test_meshpreviewview_lazy_when_tab_hidden(qtbot):
     # Wait a bit longer than the debounce interval; nothing should have run.
     qtbot.wait(view.DEBOUNCE_MS + 100)
     # The info label shouldn't have moved to "Computing…" or a result.
-    assert view._info_label.text() in ("No segmentation yet", "Computing mesh…")
+    assert "triangles" not in view._info_label.text()
 
 
 def test_meshpreviewview_preserves_camera_on_settings_change(qtbot):

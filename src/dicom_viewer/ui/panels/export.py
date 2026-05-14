@@ -24,43 +24,11 @@ from dicom_viewer.core.mesh_export import (
     Mesh,
     export_stl,
     generate_mesh,
+    resolve_export_segmentation,
 )
-from dicom_viewer.core.segmentation.base import Segmentation
-from dicom_viewer.core.segmentation.threshold import threshold
-from dicom_viewer.core.volume import Volume
 from dicom_viewer.io.nifti import save_segmentation_to_nifti
 from dicom_viewer.io.project import ExportSettings
 from dicom_viewer.ui.widgets.labeled_slider import LabeledFloatSlider, LabeledSlider
-
-
-def _resolve_export_segmentation(document: Document) -> tuple[Segmentation, str]:
-    """Pick the mask to mesh.
-
-    If the user has explicitly applied a segmentation, use that. Otherwise
-    build a one-shot iso-surface mask from the active windowing center —
-    'export 3D view as STL' for users who haven't run threshold / region-grow.
-
-    Returns (segmentation, label) where label appears in the status line and
-    suggested filename so the user knows which path was taken.
-    """
-    seg = document.segmentation
-    if seg is not None:
-        return seg, "user-segmentation"
-    volume = document.volume
-    if volume is None:
-        raise EmptyMeshError("no volume loaded — open a DICOM folder or file first")
-    # Iso-surface: window center is what the user has tuned to see brightness
-    # transitions in the slice views, so it's the most natural threshold for
-    # 'whatever's visible in the 3D view'.
-    iso = float(document.windowing.center)
-    _, hi = volume.intensity_range()
-    iso_seg = threshold(volume, iso, max(hi, iso))
-    if iso_seg.is_empty:
-        raise EmptyMeshError(
-            f"iso-surface at intensity {iso:.0f} selected zero voxels — adjust "
-            f"the windowing to a brightness threshold that includes the target."
-        )
-    return iso_seg, f"iso@{iso:.0f}"
 
 
 class _ExportWorker(QThread):
@@ -93,7 +61,11 @@ class _ExportWorker(QThread):
             volume = self._document.volume
             if volume is None:
                 raise EmptyMeshError("no volume loaded")
-            seg, _label = _resolve_export_segmentation(self._document)
+            seg, _label = resolve_export_segmentation(
+                volume,
+                self._document.segmentation,
+                float(self._document.windowing.center),
+            )
             region = self._document.region or volume.bbox()
             mesh = generate_mesh(
                 volume,

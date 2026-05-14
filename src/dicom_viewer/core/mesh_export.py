@@ -42,6 +42,37 @@ class EmptyMeshError(Exception):
     """The chosen segmentation/region intersection produced zero voxels or zero triangles."""
 
 
+def resolve_export_segmentation(
+    volume: Volume,
+    segmentation: "Segmentation | None",
+    iso_value: float,
+) -> "tuple[Segmentation, str]":
+    """Pick the mask to mesh for STL export or preview.
+
+    If a user-applied segmentation is present, use it. Otherwise fabricate a
+    one-shot iso-surface mask by thresholding above `iso_value` (typically
+    the active windowing center). Returns (segmentation, label) where
+    `label` is `'user-segmentation'` or `'iso@<value>'` for UI display.
+
+    Raises EmptyMeshError if neither path produces any voxels.
+    """
+    # Local import to avoid module-load cycle with segmentation.threshold ->
+    # segmentation.base -> mesh_export (this module).
+    from dicom_viewer.core.segmentation.threshold import threshold
+
+    if segmentation is not None:
+        return segmentation, "user-segmentation"
+
+    _, hi = volume.intensity_range()
+    iso_seg = threshold(volume, iso_value, max(hi, iso_value))
+    if iso_seg.is_empty:
+        raise EmptyMeshError(
+            f"iso-surface at intensity {iso_value:.0f} selected zero voxels — "
+            f"adjust windowing to a brightness threshold that includes the target."
+        )
+    return iso_seg, f"iso@{iso_value:.0f}"
+
+
 @dataclass(frozen=True)
 class ExportOptions:
     smoothing_iterations: int = 15

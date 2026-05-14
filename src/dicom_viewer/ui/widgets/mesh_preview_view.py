@@ -29,6 +29,7 @@ from dicom_viewer.core.mesh_export import (
     ExportOptions,
     Mesh,
     generate_mesh,
+    resolve_export_segmentation,
 )
 from dicom_viewer.core.region import Region
 from dicom_viewer.core.segmentation.base import Segmentation
@@ -107,7 +108,7 @@ class MeshPreviewView(QWidget):
         else:
             self._vtk_widget = QLabel("[STL render area]")
 
-        self._info_label = QLabel("No segmentation yet")
+        self._info_label = QLabel("No study loaded")
         self._info_label.setWordWrap(True)
         self.reset_button = QPushButton("Reset view")
         self.reset_button.setToolTip("Re-fit the camera to the current mesh")
@@ -158,6 +159,10 @@ class MeshPreviewView(QWidget):
             self.schedule_refresh()
         elif kind in ("segmentation", "region"):
             self.schedule_refresh()
+        elif kind == "windowing" and self._document.segmentation is None:
+            # In iso-surface mode the windowing center IS the threshold, so
+            # changing windowing should retrigger the mesh.
+            self.schedule_refresh()
 
     def _maybe_run_worker(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -165,13 +170,30 @@ class MeshPreviewView(QWidget):
             # re-fire when it finishes.
             return
         volume = self._document.volume
-        seg = self._document.segmentation
-        if volume is None or seg is None or seg.is_empty:
+        if volume is None:
             self._preview.set_mesh(None)
-            self._info_label.setText("No segmentation yet")
+            self._info_label.setText("No study loaded")
             self._refresh_pending = False
             self._render_if_live()
             return
+        # Use the same resolution logic as the STL export: if the user has
+        # applied a segmentation, mesh that. Otherwise mesh the iso-surface
+        # at the active windowing center — same as 'Export STL' would do.
+        try:
+            seg, label = resolve_export_segmentation(
+                volume,
+                self._document.segmentation,
+                float(self._document.windowing.center),
+            )
+        except EmptyMeshError as e:
+            self._preview.set_mesh(None)
+            self._info_label.setText(str(e))
+            self._refresh_pending = False
+            self._render_if_live()
+            return
+        # Track the source so the info label can communicate which path
+        # the user is looking at.
+        self._last_source_label = label
         region = self._document.region or volume.bbox()
         options = self._export_panel.get_export_options()
         self._info_label.setText("Computing mesh…")
@@ -193,10 +215,14 @@ class MeshPreviewView(QWidget):
     def _on_mesh_ready(self, mesh: Mesh) -> None:
         self._preview.set_mesh(mesh)
         (lo_z, lo_y, lo_x), (hi_z, hi_y, hi_x) = mesh.bounds_mm
+        source = getattr(self, "_last_source_label", "user-segmentation")
+        is_iso = source.startswith("iso")
+        suffix = f" (iso-surface @ window center — export uses full resolution)" \
+            if is_iso else " (preview — export uses full resolution)"
         self._info_label.setText(
             f"{mesh.triangle_count:,} triangles • "
-            f"{hi_x - lo_x:.1f} × {hi_y - lo_y:.1f} × {hi_z - lo_z:.1f} mm "
-            f"(preview — export uses full resolution)"
+            f"{hi_x - lo_x:.1f} × {hi_y - lo_y:.1f} × {hi_z - lo_z:.1f} mm"
+            f"{suffix}"
         )
         self.progress_bar.setVisible(False)
         self._render_if_live()
