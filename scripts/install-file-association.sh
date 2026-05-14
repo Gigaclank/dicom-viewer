@@ -31,6 +31,22 @@ xdg-mime install --mode user --novendor "$ROOT/scripts/dicom-viewer.xml"
 xdg-mime default dicom-viewer.desktop application/x-dicom-viewer-project
 update-desktop-database "$HOME/.local/share/applications" || true
 
+# Install the app icon into the user's hicolor theme so the .desktop entry's
+# Icon=dicom-viewer line resolves to a real picture in every DE.
+for sz in 16 32 48 64 128 256 512; do
+    src="$ROOT/assets/icon-${sz}.png"
+    [[ -f "$src" ]] || continue
+    dest="$HOME/.local/share/icons/hicolor/${sz}x${sz}/apps"
+    mkdir -p "$dest"
+    cp "$src" "$dest/dicom-viewer.png"
+done
+if [[ -f "$ROOT/assets/icon.svg" ]]; then
+    dest="$HOME/.local/share/icons/hicolor/scalable/apps"
+    mkdir -p "$dest"
+    cp "$ROOT/assets/icon.svg" "$dest/dicom-viewer.svg"
+fi
+gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+
 echo "Installed:"
 echo "  $DESKTOP_DST"
 echo "  MIME type application/x-dicom-viewer-project (from scripts/dicom-viewer.xml)"

@@ -7,12 +7,22 @@ Build:
 Produces dist/dicom-viewer/ (Linux/Windows directory bundle) or
 dist/DICOM Viewer.app (macOS .app bundle when sys.platform == 'darwin').
 """
+import os
 import sys
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 APP_NAME = "dicom-viewer"
 MAC_BUNDLE_NAME = "DICOM Viewer"
+# Per-platform icon for the bundled executable / .app. SVG is the source;
+# scripts/make_icons.py turns it into ICO / ICNS / PNG.
+if sys.platform == "win32":
+    APP_ICON = "assets/icon.ico"
+elif sys.platform == "darwin":
+    APP_ICON = "assets/icon.icns"
+else:
+    APP_ICON = "assets/icon.png"
 
 # --- hidden imports ---------------------------------------------------------
 # VTK loads many of its modules dynamically and PyInstaller misses some of
@@ -43,6 +53,12 @@ for pkg in ("torch", "transformers", "tokenizers", "safetensors", "huggingface_h
 # normally picks these up but collect_data_files makes sure data files (like
 # transform XMLs) come along.
 datas: list[tuple[str, str]] = []
+# Ship the icon assets inside the bundle so the runtime can load them via
+# sys._MEIPASS / assets/icon.png. Keeps the in-app window icon working even
+# when launched from the installed location with no source checkout.
+if os.path.isdir("assets"):
+    datas.append(("assets/icon.png", "assets"))
+    datas.append(("assets/icon.svg", "assets"))
 for pkg in (
     "vtkmodules",
     "SimpleITK",
@@ -93,6 +109,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=APP_ICON if os.path.exists(APP_ICON) else None,
 )
 coll = COLLECT(
     exe,
@@ -111,7 +128,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name=f"{MAC_BUNDLE_NAME}.app",
-        icon=None,
+        icon=APP_ICON if os.path.exists(APP_ICON) else None,
         bundle_identifier="com.dicomviewer.app",
         info_plist={
             "CFBundleName": MAC_BUNDLE_NAME,

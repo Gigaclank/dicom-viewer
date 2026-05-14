@@ -11,15 +11,40 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from dicom_viewer.io.config import load_last_project
 from dicom_viewer.io.project import PROJECT_EXTENSION
 from dicom_viewer.ui.main_window import MainWindow
 
+APP_NAME = "DICOM Viewer"
+
+
+def _icon_path() -> Path | None:
+    """Locate the app icon. Works both for source runs and PyInstaller bundles."""
+    candidates: list[Path] = []
+    # PyInstaller bundle: sys._MEIPASS is the temp extract dir; assets live
+    # in dist/<name>/assets/ relative to the executable.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / "icon.png")
+    # Source run: assets/ sits at the repo root, two levels above this file
+    # (src/dicom_viewer/app.py -> repo / assets / icon.png).
+    candidates.append(Path(__file__).resolve().parent.parent.parent / "assets" / "icon.png")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    icon_path = _icon_path()
+    if icon_path is not None:
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     _apply_startup_argument(window, sys.argv[1:])

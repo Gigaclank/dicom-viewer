@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>DICOM Viewer</title>
+  <desc>DICOM slice stack on the left, arrow, isometric cube on the right — slices to STL.</desc>
+
+  <!-- Rounded square background, dark teal -->
+  <rect x="0" y="0" width="512" height="512" rx="76" ry="76" fill="#0d3f4d"/>
+
+  <!-- Slice stack: four horizontal bars, gradually shifted to suggest a 3D stack -->
+  <g fill="#7fdcff">
+    <rect x="82"  y="138" width="156" height="22" rx="6"/>
+    <rect x="86"  y="186" width="156" height="22" rx="6"/>
+    <rect x="90"  y="234" width="156" height="22" rx="6"/>
+    <rect x="94"  y="282" width="156" height="22" rx="6"/>
+    <rect x="98"  y="330" width="156" height="22" rx="6"/>
+  </g>
+
+  <!-- Arrow connecting slices to the 3D cube -->
+  <path
+    d="M 268 244 L 312 244 L 312 230 L 352 256 L 312 282 L 312 268 L 268 268 Z"
+    fill="#7fdcff"/>
+
+  <!-- Isometric cube on the right -->
+  <g stroke="#ffffff" stroke-width="9" stroke-linejoin="round" fill="none">
+    <!-- Front face -->
+    <path d="M 360 218 L 446 218 L 446 318 L 360 318 Z"
+          fill="#ffffff" fill-opacity="0.10"/>
+    <!-- Top face -->
+    <path d="M 360 218 L 396 178 L 482 178 L 446 218 Z"
+          fill="#ffffff" fill-opacity="0.22"/>
+    <!-- Right face -->
+    <path d="M 446 218 L 482 178 L 482 278 L 446 318 Z"
+          fill="#ffffff" fill-opacity="0.06"/>
+  </g>
+</svg>

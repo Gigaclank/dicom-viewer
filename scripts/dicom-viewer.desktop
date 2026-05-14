@@ -3,6 +3,7 @@ Type=Application
 Name=DICOM Viewer
 Comment=View DICOM scans and export segmented regions as 3D-printable STL
 Exec=__EXEC__ %f
+Icon=dicom-viewer
 Terminal=false
 Categories=Graphics;Science;MedicalSoftware;
 MimeType=application/x-dicom-viewer-project;

@@ -67,6 +67,15 @@ jobs:
           sed 's|__EXEC__|/usr/bin/dicom-viewer|g' scripts/dicom-viewer.desktop \
             > "$STAGE/usr/share/applications/dicom-viewer.desktop"
           cp scripts/dicom-viewer.xml "$STAGE/usr/share/mime/packages/dicom-viewer.xml"
+          # App icon — install into the hicolor theme at each generated size
+          # so `Icon=dicom-viewer` in the .desktop is resolved by any DE.
+          for sz in 16 32 48 64 128 256 512; do
+            dest="$STAGE/usr/share/icons/hicolor/${sz}x${sz}/apps"
+            mkdir -p "$dest"
+            cp "assets/icon-${sz}.png" "$dest/dicom-viewer.png"
+          done
+          mkdir -p "$STAGE/usr/share/icons/hicolor/scalable/apps"
+          cp assets/icon.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/dicom-viewer.svg"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "STAGE=$STAGE"     >> "$GITHUB_ENV"
 
@@ -79,7 +88,7 @@ jobs:
             --license MIT \
             --maintainer "Aaron <agly95@gmail.com>" \
             --url "https://github.com/${GITHUB_REPOSITORY}" \
-            --after-install <(echo 'update-mime-database /usr/share/mime || true; update-desktop-database /usr/share/applications || true') \
+            --after-install <(echo 'update-mime-database /usr/share/mime || true; update-desktop-database /usr/share/applications || true; gtk-update-icon-cache /usr/share/icons/hicolor || true') \
             --depends "libegl1" --depends "libgl1" --depends "libxkbcommon-x11-0" \
             --depends "libxcb-cursor0" --depends "libxcb-icccm4" --depends "libxcb-image0" \
             --depends "libxcb-keysyms1" --depends "libxcb-randr0" --depends "libxcb-render-util0" \
