@@ -95,6 +95,37 @@ class SliceRenderer:
         self._renderer.ResetCameraClippingRange()
         self.render()
 
+    def zoom_at(self, factor: float, x_px: int, y_px: int, widget_height: int) -> None:
+        """Zoom by ``factor`` (factor < 1 = zoom in) keeping the world point
+        currently under display coords (x_px, y_px) fixed on screen.
+
+        VTK display coords have origin at bottom-left while Qt event positions
+        are top-left, so we flip y. We translate both camera position and
+        focal point by the same delta so view direction stays put — only the
+        parallel-projection scale and pan change.
+        """
+        cam = self._renderer.GetActiveCamera()
+        vtk_y = max(0, widget_height - y_px)
+        world_before = self._display_to_world(x_px, vtk_y)
+        cam.SetParallelScale(max(0.01, cam.GetParallelScale() * factor))
+        world_after = self._display_to_world(x_px, vtk_y)
+        fp = cam.GetFocalPoint()
+        pos = cam.GetPosition()
+        dx = world_before[0] - world_after[0]
+        dy = world_before[1] - world_after[1]
+        dz = world_before[2] - world_after[2]
+        cam.SetFocalPoint(fp[0] + dx, fp[1] + dy, fp[2] + dz)
+        cam.SetPosition(pos[0] + dx, pos[1] + dy, pos[2] + dz)
+        self._renderer.ResetCameraClippingRange()
+
+    def _display_to_world(self, x_px: int, y_px: int) -> tuple[float, float, float]:
+        self._renderer.SetDisplayPoint(float(x_px), float(y_px), 0.0)
+        self._renderer.DisplayToWorld()
+        wx, wy, wz, ww = self._renderer.GetWorldPoint()
+        if ww == 0:
+            return (wx, wy, wz)
+        return (wx / ww, wy / ww, wz / ww)
+
     # --- internals ---
     def _max_index(self) -> int:
         if self._volume is None:

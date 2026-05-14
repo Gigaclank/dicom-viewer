@@ -111,3 +111,38 @@ def test_slice_renderer_reset_view_restores_default_camera():
     r.reset_view()
     # View-up is restored to (0, 1, 0).
     assert cam.GetViewUp() == (0.0, 1.0, 0.0)
+
+
+def test_zoom_at_pins_world_point_under_cursor():
+    """Cursor-centered zoom invariant: the world point that lay under the
+    cursor before the zoom must lie under the same cursor pixel afterwards.
+    Otherwise a Ctrl+wheel zoom would feel like 'jump-then-scale'."""
+    r = SliceRenderer(orientation=Orientation.AXIAL)
+    r.set_volume(_vol())
+    # Force a known window size so display-to-world is meaningful.
+    if r._render_window is not None:
+        r._render_window.SetSize(400, 300)
+        r._render_window.Render()
+    widget_h = 300
+    cursor_x, cursor_y = 100, 80  # Qt coords (top-left origin)
+
+    vtk_y = widget_h - cursor_y
+    world_before = r._display_to_world(cursor_x, vtk_y)
+    r.zoom_at(0.5, cursor_x, cursor_y, widget_h)  # zoom in 2x
+    world_after_zoom_at_same_pixel = r._display_to_world(cursor_x, vtk_y)
+
+    # The same screen pixel must map to (approximately) the same world point.
+    assert world_after_zoom_at_same_pixel[0] == pytest.approx(world_before[0], abs=1e-3)
+    assert world_after_zoom_at_same_pixel[1] == pytest.approx(world_before[1], abs=1e-3)
+
+
+def test_zoom_at_changes_parallel_scale():
+    r = SliceRenderer(orientation=Orientation.AXIAL)
+    r.set_volume(_vol())
+    if r._render_window is not None:
+        r._render_window.SetSize(400, 300)
+        r._render_window.Render()
+    cam = r._renderer.GetActiveCamera()
+    before = cam.GetParallelScale()
+    r.zoom_at(0.5, 200, 150, 300)
+    assert cam.GetParallelScale() == pytest.approx(before * 0.5, abs=1e-6)

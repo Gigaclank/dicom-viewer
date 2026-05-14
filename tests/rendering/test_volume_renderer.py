@@ -98,6 +98,27 @@ def test_loading_a_new_volume_uses_default_orientation_not_inherited_rotation():
     assert r._home_view_up == (0.0, 0.0, 1.0)
 
 
+def test_camera_focal_point_is_volume_center_so_rotation_pivots_correctly():
+    """Trackball rotation orbits around the camera's focal point. If the focal
+    point sits at world origin (a corner of the volume), rotation feels like
+    swinging the scene through space instead of turning it in place. After
+    ResetCamera, the focal point should land at the rendered volume's
+    bounding-box center — i.e. inside the volume, not at the corner."""
+    arr = np.zeros((10, 20, 30), dtype=np.int16)
+    arr[2:8, 2:18, 2:28] = 500
+    vol = Volume(array=arr, spacing_mm=(2.0, 1.5, 1.0), modality="CT")
+    r = VolumeRenderer()
+    r.set_volume(vol)
+    cam = r._renderer.GetActiveCamera()
+    fp = cam.GetFocalPoint()
+    # VTK image points sit at voxel centers from 0 to (n-1)*spacing, so the
+    # bounding-box center is ((x-1)*sx/2, (y-1)*sy/2, (z-1)*sz/2).
+    expected = ((30 - 1) * 1.0 / 2, (20 - 1) * 1.5 / 2, (10 - 1) * 2.0 / 2)
+    assert fp == pytest.approx(expected, abs=1e-6)
+    # And critically: NOT at the origin / corner of the volume.
+    assert fp != (0.0, 0.0, 0.0)
+
+
 def test_overlay_mask_hides_volume_and_shows_surface():
     r = VolumeRenderer()
     r.set_volume(_vol())

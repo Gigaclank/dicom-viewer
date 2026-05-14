@@ -17,6 +17,13 @@ class MeshPreview:
         # swap, or on an explicit Reset). Settings-driven re-renders should
         # leave the user's current rotation/zoom alone.
         self._needs_fit: bool = True
+        # Camera snapshot for reset_view. Plain ResetCamera() only re-distances
+        # to fit the scene; it preserves view direction and view-up, so a user
+        # who has rotated wouldn't see their orientation come back.
+        self._home_position: tuple[float, float, float] | None = None
+        self._home_focal: tuple[float, float, float] | None = None
+        self._home_view_up: tuple[float, float, float] | None = None
+        self._home_parallel_scale: float | None = None
 
     def attach_render_window(self, render_window: vtk.vtkRenderWindow) -> None:
         render_window.AddRenderer(self._renderer)
@@ -42,18 +49,52 @@ class MeshPreview:
         self._renderer.AddActor(actor)
         self._actor = actor
         if self._needs_fit:
+            # Set a known orientation BEFORE ResetCamera so rotation centers
+            # on the mesh and the home state is reproducible across reloads.
+            xmin, xmax, ymin, ymax, zmin, zmax = mesh.polydata.GetBounds()
+            cx = (xmin + xmax) * 0.5
+            cy = (ymin + ymax) * 0.5
+            cz = (zmin + zmax) * 0.5
+            cam = self._renderer.GetActiveCamera()
+            cam.SetFocalPoint(cx, cy, cz)
+            cam.SetPosition(cx, cy - 1.0, cz)
+            cam.SetViewUp(0.0, 0.0, 1.0)
             self._renderer.ResetCamera()
+            self._capture_home_camera()
             self._needs_fit = False
         # Always recompute the clipping range so the new actor is visible.
         self._renderer.ResetCameraClippingRange()
+
+    def _capture_home_camera(self) -> None:
+        cam = self._renderer.GetActiveCamera()
+        self._home_position = tuple(cam.GetPosition())
+        self._home_focal = tuple(cam.GetFocalPoint())
+        self._home_view_up = tuple(cam.GetViewUp())
+        self._home_parallel_scale = float(cam.GetParallelScale())
 
     def render(self) -> None:
         if self._render_window is not None:
             self._render_window.Render()
 
     def reset_view(self) -> None:
-        """Re-fit the camera to whatever's currently in the scene."""
-        self._renderer.ResetCamera()
+        """Restore the camera to the position captured when the mesh first fit.
+
+        ResetCamera() alone preserves the current view direction, so rotation
+        wouldn't actually reset. Restoring the captured home state does.
+        """
+        if (
+            self._home_position is None
+            or self._home_focal is None
+            or self._home_view_up is None
+        ):
+            self._renderer.ResetCamera()
+        else:
+            cam = self._renderer.GetActiveCamera()
+            cam.SetPosition(*self._home_position)
+            cam.SetFocalPoint(*self._home_focal)
+            cam.SetViewUp(*self._home_view_up)
+            if self._home_parallel_scale is not None:
+                cam.SetParallelScale(self._home_parallel_scale)
         self._renderer.ResetCameraClippingRange()
         self._needs_fit = False
         self.render()
