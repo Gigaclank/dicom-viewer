@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -48,6 +49,25 @@ class SegmentationPanel(QWidget):
         self._live_debounce.setSingleShot(True)
         self._live_debounce.setInterval(self.LIVE_DEBOUNCE_MS)
         self._live_debounce.timeout.connect(self._apply_now)
+
+        # --- mask library row ---
+        self.mask_combo = QComboBox()
+        self.mask_combo.setToolTip(
+            "Switch between named masks saved in this project. The active "
+            "segmentation comes from the selected entry, or 'unsaved' if "
+            "you've created a new mask but not named it yet."
+        )
+        self.mask_combo.currentIndexChanged.connect(self._on_mask_combo_changed)
+        self.save_mask_button = QPushButton("Save as…")
+        self.save_mask_button.setToolTip(
+            "Save the current segmentation under a name so you can switch "
+            "back to it. Saved masks travel with the project file."
+        )
+        self.save_mask_button.clicked.connect(self._on_save_mask_clicked)
+        self.delete_mask_button = QPushButton("Delete")
+        self.delete_mask_button.setToolTip("Remove the selected named mask from the project.")
+        self.delete_mask_button.clicked.connect(self._on_delete_mask_clicked)
+        self.delete_mask_button.setEnabled(False)
 
         self.method_combo = QComboBox()
         self.method_combo.addItems(["Threshold", "Region grow"])
@@ -109,6 +129,13 @@ class SegmentationPanel(QWidget):
         self.progress_bar.setVisible(False)
 
         form = QFormLayout()
+        # Mask library row at the top — most-used control when juggling
+        # multiple targets (bone, tumor, vessels, ...).
+        mask_row = QHBoxLayout()
+        mask_row.addWidget(self.mask_combo, stretch=1)
+        mask_row.addWidget(self.save_mask_button)
+        mask_row.addWidget(self.delete_mask_button)
+        form.addRow("Saved mask", mask_row)
         form.addRow("Method", self.method_combo)
         form.addRow("Low", self.low_slider)
         form.addRow("High", self.high_slider)
@@ -136,6 +163,7 @@ class SegmentationPanel(QWidget):
         document.subscribe(self._on_doc_event)
         # If a study is already loaded, adapt slider ranges immediately.
         self._refresh_slider_range()
+        self._refresh_mask_combo()
 
     # --- live preview path ---
     def _on_threshold_changed(self, _value=None) -> None:
@@ -324,6 +352,107 @@ class SegmentationPanel(QWidget):
                 self._status.setText("No segmentation")
             else:
                 self._status.setText(f"{seg.method} — {seg.voxel_count:,} voxels")
+        if kind in ("mask_library", "study"):
+            self._refresh_mask_combo()
+
+    # --- mask library UI ---
+    _UNSAVED_LABEL = "(unsaved)"
+
+    def _refresh_mask_combo(self) -> None:
+        """Sync the combo to the document's library + active mask."""
+        self.mask_combo.blockSignals(True)
+        try:
+            self.mask_combo.clear()
+            self.mask_combo.addItem(self._UNSAVED_LABEL)
+            for name in self._document.mask_names:
+                self.mask_combo.addItem(name)
+            active = self._document.active_mask_name
+            if active:
+                idx = self.mask_combo.findText(active)
+                if idx >= 0:
+                    self.mask_combo.setCurrentIndex(idx)
+            else:
+                self.mask_combo.setCurrentIndex(0)
+        finally:
+            self.mask_combo.blockSignals(False)
+        # Delete is only valid for a saved entry.
+        self.delete_mask_button.setEnabled(bool(self._document.active_mask_name))
+
+    def _on_mask_combo_changed(self, _index: int) -> None:
+        name = self.mask_combo.currentText()
+        if name == self._UNSAVED_LABEL:
+            # The user clicked back to 'unsaved' — clear the active library
+            # entry but don't wipe the current segmentation, in case they
+            # want to keep editing without losing it.
+            # (Wiping would surprise users who picked unsaved by accident.)
+            self._document._active_mask_name = ""  # noqa: SLF001 — internal protocol
+            self._document._emit("mask_library")  # noqa: SLF001
+            return
+        if name == self._document.active_mask_name:
+            return
+        self._document.activate_mask(name)
+
+    def _on_save_mask_clicked(self) -> None:
+        if self._document.segmentation is None:
+            QMessageBox.information(
+                self,
+                "No segmentation",
+                "Apply a segmentation first, then save it under a name.",
+            )
+            return
+        existing = self._document.active_mask_name
+        suggested = existing or self._suggested_mask_name()
+        name, ok = QInputDialog.getText(
+            self, "Save mask", "Mask name:", text=suggested
+        )
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        # Sanitize: avoid characters that confuse the companion-file lookup
+        # ('/', '\\', '..'). Names show up verbatim in the picker.
+        bad = ("/", "\\", "..")
+        if any(b in name for b in bad):
+            QMessageBox.warning(
+                self, "Invalid name",
+                "Mask names cannot contain '/', '\\' or '..'.",
+            )
+            return
+        if name in self._document.mask_names and existing != name:
+            yes = QMessageBox.question(
+                self, "Overwrite mask?",
+                f"A mask named '{name}' already exists. Overwrite?",
+            )
+            if yes != QMessageBox.StandardButton.Yes:
+                return
+        self._document.save_mask_as(name)
+
+    def _on_delete_mask_clicked(self) -> None:
+        name = self._document.active_mask_name
+        if not name:
+            return
+        yes = QMessageBox.question(
+            self, "Delete mask?", f"Delete saved mask '{name}'?",
+        )
+        if yes != QMessageBox.StandardButton.Yes:
+            return
+        self._document.delete_mask(name)
+
+    def _suggested_mask_name(self) -> str:
+        seg = self._document.segmentation
+        if seg is None:
+            return "mask"
+        # Use the method as a starting hint, drop the chained suffixes.
+        base = seg.method.split("+", 1)[0]
+        # If a mask already has this name, suffix with -2, -3, ...
+        existing = set(self._document.mask_names)
+        candidate = base
+        n = 2
+        while candidate in existing:
+            candidate = f"{base}-{n}"
+            n += 1
+        return candidate
 
     # --- project file integration ---
     def get_settings(self) -> SegmentationSettings:

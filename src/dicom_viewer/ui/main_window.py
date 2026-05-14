@@ -29,8 +29,10 @@ from dicom_viewer.io.dicom_loader import (
     load_series_from_file,
     load_series_from_folder,
 )
+from dicom_viewer.io.nifti import load_segmentation_from_nifti, save_segmentation_to_nifti
 from dicom_viewer.io.project import (
     PROJECT_EXTENSION,
+    MaskEntry,
     Project,
     ProjectError,
     RegionSettings,
@@ -318,13 +320,42 @@ class MainWindow(QMainWindow):
 
     def _save_project_to(self, path: Path) -> None:
         try:
-            save_project(path, self.collect_project())
+            # Write companion mask files BEFORE the JSON so the file lookup
+            # paths are stable. _write_mask_companions returns the
+            # MaskEntry list to embed in the project.
+            mask_entries = self._write_mask_companions(path)
+            project = self.collect_project()
+            project.masks = mask_entries
+            project.active_mask = self.document.active_mask_name
+            save_project(path, project)
         except OSError as e:
             QMessageBox.warning(self, "Save failed", str(e))
             return
         self._current_project_path = path
         save_last_project(path)
         self._update_window_title()
+
+    def _write_mask_companions(self, project_path: Path) -> list[MaskEntry]:
+        """Write each library mask as <project-stem>.<mask-name>.nii.gz
+        alongside `project_path`. Returns MaskEntry list with names + paths
+        relative to project_path's parent."""
+        volume = self.document.volume
+        if volume is None or not self.document.mask_names:
+            return []
+        stem = project_path.stem
+        parent = project_path.parent
+        entries: list[MaskEntry] = []
+        for name in self.document.mask_names:
+            seg = self.document.get_mask(name)
+            if seg is None:
+                continue
+            # Sanitize the mask name for the filesystem; the displayed name
+            # stays unchanged in the project JSON.
+            safe = name.replace("/", "_").replace("\\", "_")
+            mask_file = parent / f"{stem}.{safe}.nii.gz"
+            save_segmentation_to_nifti(seg, volume, mask_file)
+            entries.append(MaskEntry(name=name, path=mask_file.name))
+        return entries
 
     def load_project_from_path(self, path: Path) -> bool:
         """Public entry point: load a project, used by File menu and CLI."""
@@ -333,7 +364,7 @@ class MainWindow(QMainWindow):
         except ProjectError as e:
             QMessageBox.warning(self, "Open project failed", str(e))
             return False
-        if not self.apply_project(project):
+        if not self.apply_project(project, project_path=path):
             return False
         self._current_project_path = path
         save_last_project(path)
@@ -359,8 +390,13 @@ class MainWindow(QMainWindow):
             export=self.export_panel.get_settings(),
         )
 
-    def apply_project(self, project: Project) -> bool:
-        """Apply settings from `project`, loading its source first."""
+    def apply_project(self, project: Project, project_path: Path | None = None) -> bool:
+        """Apply settings from `project`, loading its source first.
+
+        `project_path` is the on-disk location of the project file, used to
+        resolve relative mask companion paths. CLI / programmatic callers
+        can omit it; in that case masks aren't loaded.
+        """
         if project.source.path:
             src = Path(project.source.path)
             if project.source.kind == "folder":
@@ -383,7 +419,46 @@ class MainWindow(QMainWindow):
             )
         self.segmentation_panel.apply_settings(project.segmentation)
         self.export_panel.apply_settings(project.export)
+        # Load companion masks last so the segmentation settings panel's
+        # auto-applied result is replaced by whichever named mask the user
+        # had active when they saved the project.
+        if project_path is not None and project.masks:
+            self._load_mask_companions(project_path, project.masks, project.active_mask)
         return True
+
+    def _load_mask_companions(
+        self,
+        project_path: Path,
+        entries: list[MaskEntry],
+        active_name: str,
+    ) -> None:
+        volume = self.document.volume
+        if volume is None:
+            return
+        parent = project_path.parent
+        loaded: dict[str, "Segmentation"] = {}  # type: ignore[name-defined]
+        skipped: list[str] = []
+        for entry in entries:
+            if not entry.name or not entry.path:
+                continue
+            mask_path = parent / entry.path
+            if not mask_path.exists():
+                skipped.append(f"{entry.name} ({entry.path}: not found)")
+                continue
+            try:
+                seg = load_segmentation_from_nifti(mask_path, volume)
+            except Exception as e:  # noqa: BLE001
+                skipped.append(f"{entry.name} ({type(e).__name__}: {e})")
+                continue
+            loaded[entry.name] = seg
+        if loaded:
+            self.document.replace_masks(loaded, active_name=active_name)
+        if skipped:
+            QMessageBox.warning(
+                self,
+                "Some masks couldn't be loaded",
+                "The following masks were skipped:\n  • " + "\n  • ".join(skipped),
+            )
 
     def _update_window_title(self) -> None:
         base = "DICOM Viewer"

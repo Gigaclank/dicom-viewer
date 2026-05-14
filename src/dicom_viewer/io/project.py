@@ -68,12 +68,30 @@ class ExportSettings:
 
 
 @dataclass
+class MaskEntry:
+    """A named mask in the project's mask library.
+
+    `path` is RELATIVE to the project file (so the project directory can be
+    moved / copied as a unit). The file at that path is the NIfTI-encoded
+    mask saved by save_segmentation_to_nifti().
+    """
+
+    name: str = ""
+    path: str = ""
+
+
+@dataclass
 class Project:
     source: SourceSettings = field(default_factory=SourceSettings)
     windowing: WindowingSettings = field(default_factory=WindowingSettings)
     segmentation: SegmentationSettings = field(default_factory=SegmentationSettings)
     region: RegionSettings = field(default_factory=RegionSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
+    # Mask library — each entry points to a companion NIfTI file alongside
+    # the project. active_mask names the one currently loaded as the
+    # document's segmentation.
+    masks: list[MaskEntry] = field(default_factory=list)
+    active_mask: str = ""
     version: int = PROJECT_VERSION
 
 
@@ -101,12 +119,21 @@ def load_project(path: Path) -> Project:
             f"unsupported project version {version} in {path} "
             f"(this build expects v{PROJECT_VERSION})"
         )
+    masks_raw = raw.get("masks", []) or []
+    masks: list[MaskEntry] = []
+    if isinstance(masks_raw, list):
+        for m in masks_raw:
+            if isinstance(m, dict):
+                masks.append(_take(MaskEntry, m))
+
     return Project(
         source=_take(SourceSettings, raw.get("source", {})),
         windowing=_take(WindowingSettings, raw.get("windowing", {})),
         segmentation=_take(SegmentationSettings, raw.get("segmentation", {})),
         region=_region_from(raw.get("region", {})),
         export=_take(ExportSettings, raw.get("export", {})),
+        masks=masks,
+        active_mask=str(raw.get("active_mask", "") or ""),
     )
 
 

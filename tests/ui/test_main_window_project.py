@@ -121,6 +121,48 @@ def test_open_folder_path_returns_true_on_real_load(qtbot, tmp_path):
     assert win.document.volume.shape == (4, 8, 8)
 
 
+def test_mask_library_round_trips_through_project(qtbot, tmp_path):
+    """Save a project with two named masks, reload it, verify both masks land
+    in the document and the active one becomes the segmentation."""
+    import numpy as np
+
+    from dicom_viewer.core.segmentation.threshold import threshold
+
+    series_dir = make_synthetic_ct_series(tmp_path / "scan", shape=(4, 8, 8))
+    project_path = tmp_path / f"masks{PROJECT_EXTENSION}"
+
+    win1 = MainWindow()
+    qtbot.addWidget(win1)
+    assert win1.open_folder_path(series_dir)
+    vol = win1.document.volume
+    # Two distinct masks.
+    win1.document.set_segmentation(threshold(vol, low=-2000, high=10000))
+    win1.document.save_mask_as("A")
+    win1.document.set_segmentation(threshold(vol, low=-100, high=10000))
+    win1.document.save_mask_as("B")
+    assert win1.document.active_mask_name == "B"
+
+    win1._save_project_to(project_path)
+
+    # Companion files should have been written next to the project.
+    assert (tmp_path / f"masks.A.nii.gz").exists()
+    assert (tmp_path / f"masks.B.nii.gz").exists()
+
+    win2 = MainWindow()
+    qtbot.addWidget(win2)
+    assert win2.load_project_from_path(project_path)
+    # Both masks present, B active (it was active at save time).
+    assert set(win2.document.mask_names) == {"A", "B"}
+    assert win2.document.active_mask_name == "B"
+    assert win2.document.segmentation is not None
+    # Switching to A produces a different mask (the void-area threshold).
+    win2.document.activate_mask("A")
+    assert win2.document.active_mask_name == "A"
+    assert win2.document.segmentation is not None
+    # The two masks have distinct voxel counts (the thresholds were different).
+    assert win2.document.get_mask("A").voxel_count != win2.document.get_mask("B").voxel_count
+
+
 def test_load_corrupt_project_does_not_crash(qtbot, tmp_path, monkeypatch):
     bad = tmp_path / f"bad{PROJECT_EXTENSION}"
     bad.write_text("not even json", encoding="utf-8")
