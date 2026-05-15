@@ -4,8 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
 from PyQt6.QtCore import QCoreApplication, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -17,18 +20,30 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QProgressDialog,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
 
 from dicom_viewer.core.document import Document
 from dicom_viewer.core.region import Region
+from dicom_viewer.core.segmentation.base import Segmentation
+from dicom_viewer.core.segmentation.click_seed import (
+    apply_brush_stroke,
+    box_from_seed,
+    confidence_grow_from_seed,
+    grow_from_seed,
+    paint_disc_2d,
+    sphere_from_seed,
+    threshold_from_seed,
+)
 from dicom_viewer.core.segmentation.morphology import keep_largest_component, smooth_mask
 from dicom_viewer.core.segmentation.region_grow import region_grow
 from dicom_viewer.core.segmentation.threshold import threshold
-from dicom_viewer.core.volume import Volume
+from dicom_viewer.core.volume import Orientation, Volume
 from dicom_viewer.io.nifti import load_segmentation_from_nifti
 from dicom_viewer.io.project import SegmentationSettings
+from dicom_viewer.ui.status_model import StatusModel
 from dicom_viewer.ui.widgets.labeled_slider import LabeledSlider
 
 
@@ -37,11 +52,27 @@ class SegmentationPanel(QWidget):
     # doesn't spawn workers per pixel, short enough to feel responsive.
     LIVE_DEBOUNCE_MS = 300
 
-    def __init__(self, document: Document) -> None:
+    # Mirrors SliceView's brush modes. Emitted whenever the user picks a
+    # different mode; MainWindow routes this to all three slice views.
+    brush_mode_changed = pyqtSignal(str)
+
+    def __init__(self, document: Document, status: StatusModel | None = None) -> None:
         super().__init__()
         self._document = document
+        # Optional global "Currently doing" surface — Nothing fails if it's
+        # absent (tests construct the panel directly without a MainWindow).
+        self._status_model = status
         self._suppress_live = False
         self._seg_worker: Optional["_SegmentationWorker"] = None
+        self._brush_worker: Optional["_BrushWorker"] = None
+        # All brush workers we've started that haven't reported `finished`
+        # yet. SITK ConnectedThreshold can't be interrupted mid-call, so a
+        # cancelled worker keeps running for the full SITK duration; if we
+        # only held a reference to the latest worker, Python would GC the
+        # older ones while their QThreads were still running, which aborts
+        # the process. This list keeps them alive until `finished` fires.
+        self._brush_workers_in_flight: list["_BrushWorker"] = []
+        self._brush_mode: str = "off"
 
         # Debounce live-preview triggers — slider value-changed fires per-tick,
         # but we only want to start a worker when the user pauses.
@@ -118,6 +149,62 @@ class SegmentationPanel(QWidget):
         )
         self.medsam_button.clicked.connect(self._on_medsam_clicked)
 
+        # --- Tumor brush ---
+        # Click-driven interactive segmentation: click inside the tumor to add
+        # a flood-filled region; click on a leak to subtract it. Tolerance
+        # below controls the intensity window around the seed voxel.
+        self.brush_off_radio = QRadioButton("Off")
+        self.brush_add_radio = QRadioButton("Add")
+        self.brush_remove_radio = QRadioButton("Remove")
+        self.brush_off_radio.setChecked(True)
+        self._brush_group = QButtonGroup(self)
+        self._brush_group.addButton(self.brush_off_radio)
+        self._brush_group.addButton(self.brush_add_radio)
+        self._brush_group.addButton(self.brush_remove_radio)
+        self.brush_off_radio.toggled.connect(
+            lambda checked: checked and self._set_brush_mode("off")
+        )
+        self.brush_add_radio.toggled.connect(
+            lambda checked: checked and self._set_brush_mode("add")
+        )
+        self.brush_remove_radio.toggled.connect(
+            lambda checked: checked and self._set_brush_mode("remove")
+        )
+        for btn, tip in (
+            (self.brush_off_radio, "Normal slice interaction (drag = window/level, wheel = scrub)."),
+            (self.brush_add_radio, "Click inside the tumor on any slice to grow a region and add it to the current mask."),
+            (self.brush_remove_radio, "Click on tissue that leaked into the mask to subtract it."),
+        ):
+            btn.setToolTip(tip)
+
+        # --- brush kind selector ---
+        # Different shapes/algorithms for the same click+mode workflow:
+        # Region grow is the click-anywhere flood-fill; Threshold catches
+        # internal voids; Sphere/Box drop a 3D primitive; 2D paint streams
+        # disc strokes as the user drags; Smart grow uses local image
+        # statistics for diffuse boundaries.
+        self.brush_kind_combo = QComboBox()
+        self.brush_kind_combo.addItem("Region grow", userData="region_grow")
+        self.brush_kind_combo.addItem("Threshold (no connectivity)", userData="threshold")
+        self.brush_kind_combo.addItem("Sphere (drops a 3D ball)", userData="sphere")
+        self.brush_kind_combo.addItem("Box (drops a 3D box)", userData="box")
+        self.brush_kind_combo.addItem("2D paint (drag to draw)", userData="paint_2d")
+        self.brush_kind_combo.addItem("Smart grow (statistical)", userData="confidence")
+        self.brush_kind_combo.setToolTip(
+            "Which math the brush click runs. Region grow is the default; "
+            "switch to others for tumors with internal voids, diffuse "
+            "boundaries, or when you want a primitive shape instead."
+        )
+
+        # Spatial brush size — used by sphere/box (mm radius / half-extent)
+        # and 2D paint (pixel radius). Reinterpreted per kind; the label
+        # in the panel updates so the unit stays clear.
+        self.brush_radius_slider = LabeledSlider(1, 100, 8)
+        self.brush_radius_slider.setToolTip(
+            "Spatial size of the brush. Units depend on the brush kind: "
+            "mm for sphere/box (world-space), pixels for 2D paint."
+        )
+
         self._status = QLabel("No segmentation")
         self._status.setWordWrap(True)
 
@@ -136,6 +223,17 @@ class SegmentationPanel(QWidget):
         mask_row.addWidget(self.save_mask_button)
         mask_row.addWidget(self.delete_mask_button)
         form.addRow("Saved mask", mask_row)
+        # Tumor brush: primary tumor-segmentation workflow, kept above the
+        # threshold/region-grow controls because click-drive is the fast
+        # path for soft-tissue lesions where threshold can't find an edge.
+        brush_row = QHBoxLayout()
+        brush_row.addWidget(self.brush_off_radio)
+        brush_row.addWidget(self.brush_add_radio)
+        brush_row.addWidget(self.brush_remove_radio)
+        brush_row.addStretch(1)
+        form.addRow("Tumor brush", brush_row)
+        form.addRow("Brush kind", self.brush_kind_combo)
+        form.addRow("Brush size", self.brush_radius_slider)
         form.addRow("Method", self.method_combo)
         form.addRow("Low", self.low_slider)
         form.addRow("High", self.high_slider)
@@ -165,9 +263,209 @@ class SegmentationPanel(QWidget):
         self._refresh_slider_range()
         self._refresh_mask_combo()
 
+    # --- brush mode ---
+    def _set_brush_mode(self, mode: str) -> None:
+        """Switch the click-seed brush. Emits brush_mode_changed so MainWindow
+        can mirror the mode to all three slice views."""
+        if mode == self._brush_mode:
+            return
+        self._brush_mode = mode
+        self.brush_mode_changed.emit(mode)
+
+    @property
+    def brush_mode(self) -> str:
+        return self._brush_mode
+
+    def handle_seed_click(self, seed: tuple[int, int, int], mode: str) -> None:
+        """Slot for SliceView.seed_clicked. Branches on the selected brush
+        kind: the heavy (SITK-driven) kinds dispatch to a worker thread so
+        the UI stays responsive; the cheap kinds (sphere/box) also use the
+        worker for code uniformity; 2D paint runs synchronously per-click
+        because strokes need single-frame latency."""
+        volume = self._document.volume
+        if volume is None:
+            return
+        kind = self.brush_kind_combo.currentData() or "region_grow"
+        if kind == "paint_2d":
+            self._apply_paint_disc(seed, mode)
+            return
+
+        # Cancel any in-flight brush worker. SITK ConnectedThreshold can't be
+        # interrupted mid-call, so the old run will complete; its result is
+        # rejected by the identity check on finished_ok. Guard against the
+        # ref pointing at a C++ object Qt has already deleted (happens when
+        # the previous worker finished and retired before this click).
+        if self._brush_worker is not None:
+            try:
+                running = self._brush_worker.isRunning()
+            except RuntimeError:
+                # C++ object gone — Qt already deleted it after finished().
+                running = False
+                self._brush_worker = None
+            if running:
+                self._brush_worker.requestInterruption()
+
+        tolerance = float(self.tolerance_slider.value())
+        radius = float(self.brush_radius_slider.value())
+        region = self._document.region
+        base_mask = (
+            self._document.segmentation.mask if self._document.segmentation else None
+        )
+        prev_method = (
+            self._document.segmentation.method if self._document.segmentation else ""
+        )
+
+        worker = _BrushWorker(
+            volume=volume,
+            seed=seed,
+            tolerance=tolerance,
+            radius=radius,
+            region=region,
+            mode=mode,
+            kind=kind,
+            base_mask=base_mask,
+            prev_method=prev_method,
+        )
+        worker.progress.connect(self._on_seg_progress)
+        worker.finished_ok.connect(self._on_brush_ready)
+        worker.failed.connect(self._on_brush_failed)
+        # Keep alive until the QThread actually exits, even if a newer click
+        # has replaced the `_brush_worker` reference.
+        worker.finished.connect(lambda w=worker: self._retire_brush_worker(w))
+        self._brush_workers_in_flight.append(worker)
+
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Brush — %p%")
+        self.progress_bar.setVisible(True)
+        self._report_status("brush", f"Brush {mode} ({kind})")
+
+        self._brush_worker = worker
+        worker.start()
+
+    def handle_seed_drag(
+        self,
+        seed: tuple[int, int, int],
+        mode: str,
+        orientation: Orientation,
+    ) -> None:
+        """Slot for SliceView.seed_dragged. Paint brushes turn drag streams
+        into per-position disc stamps; other kinds ignore drags (they only
+        act on the initial press)."""
+        kind = self.brush_kind_combo.currentData() or "region_grow"
+        if kind != "paint_2d":
+            return
+        self._apply_paint_disc(seed, mode, orientation=orientation)
+
+    def _apply_paint_disc(
+        self,
+        seed: tuple[int, int, int],
+        mode: str,
+        orientation: Orientation | None = None,
+    ) -> None:
+        """Mutate the current segmentation mask with a 2D disc at the seed
+        position. Runs synchronously on the UI thread because strokes need
+        single-frame latency; the disc paint is a cheap numpy slice."""
+        volume = self._document.volume
+        if volume is None:
+            return
+        radius_px = max(1, int(self.brush_radius_slider.value()))
+        # Reuse the existing mask in place when possible — paint strokes
+        # generate many events per second and allocating a fresh array
+        # each time would thrash GC on large volumes.
+        seg = self._document.segmentation
+        if seg is None:
+            mask = np.zeros(volume.shape, dtype=bool)
+        else:
+            mask = seg.mask
+            if not mask.flags.writeable:
+                mask = mask.copy()
+
+        z, y, x = seed
+        # If the caller didn't tell us the orientation (e.g. press event
+        # that arrived via handle_seed_click), infer it from which axis
+        # equals the current slice index. Default to AXIAL.
+        if orientation is None:
+            orientation = Orientation.AXIAL
+        if orientation is Orientation.AXIAL:
+            slice_idx, center = z, (y, x)
+        elif orientation is Orientation.CORONAL:
+            slice_idx, center = y, ((volume.shape[0] - 1) - z, x)
+        else:  # SAGITTAL
+            slice_idx, center = x, ((volume.shape[0] - 1) - z, y)
+        paint_disc_2d(
+            mask,
+            orientation,
+            slice_idx,
+            center,
+            radius_px,
+            set_value=(mode == "add"),
+        )
+        prev_method = seg.method if seg is not None else ""
+        method = (
+            "paint_2d"
+            if not prev_method
+            else (
+                prev_method if prev_method.endswith("paint_2d") else f"{prev_method}+paint_2d"
+            )
+        )
+        new_seg = Segmentation(
+            mask=mask,
+            method=method,
+            params={"radius_px": radius_px, "mode": mode},
+        )
+        self._document.set_segmentation(new_seg)
+
+    def _retire_brush_worker(self, worker: "_BrushWorker") -> None:
+        """Called when a brush worker's QThread emits `finished`. Drops it
+        from the keep-alive list AND clears `self._brush_worker` if it was
+        the latest reference, so the next click doesn't try to inspect a
+        worker whose C++ object Qt has already collected."""
+        try:
+            self._brush_workers_in_flight.remove(worker)
+        except ValueError:
+            pass
+        if self._brush_worker is worker:
+            self._brush_worker = None
+
+    def _on_brush_ready(
+        self,
+        worker: "_BrushWorker",
+        mask,
+        method: str,
+        params: dict,
+    ) -> None:
+        if worker is not self._brush_worker:
+            return
+        seg = Segmentation(mask=mask, method=method, params=params)
+        self._document.set_segmentation(seg)
+        self.progress_bar.setVisible(False)
+        self._end_status("brush")
+
+    def _on_brush_failed(self, worker: "_BrushWorker", msg: str) -> None:
+        if worker is not self._brush_worker:
+            return
+        self._status.setText(f"Brush failed: {msg}")
+        self.progress_bar.setVisible(False)
+        self._end_status("brush")
+
+    def run_handle_seed_click_blocking(
+        self, seed: tuple[int, int, int], mode: str, timeout_ms: int = 5000
+    ) -> None:
+        """Dispatch a brush click and wait for its worker. Used by tests
+        that need a deterministic post-click state."""
+        self.handle_seed_click(seed, mode)
+        if self._brush_worker is None:
+            return
+        self._brush_worker.wait(timeout_ms)
+        QCoreApplication.processEvents()
+
     # --- live preview path ---
     def _on_threshold_changed(self, _value=None) -> None:
         if self._suppress_live:
+            return
+        # The brush owns the segmentation while it's active; threshold drags
+        # would clobber accumulated brush strokes.
+        if self._brush_mode != "off":
             return
         if not self.live_preview_checkbox.isChecked():
             return
@@ -240,18 +538,22 @@ class SegmentationPanel(QWidget):
         dialog.canceled.connect(worker.requestInterruption)
 
         state: dict[str, object] = {}
+        self._report_status("medsam", "MedSAM — loading model…")
 
         def on_progress(stage: str, fraction: float) -> None:
             dialog.setLabelText(stage)
             dialog.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+            self._update_status("medsam", f"MedSAM — {stage}")
 
         def on_done(seg) -> None:
             state["result"] = seg
             dialog.close()
+            self._end_status("medsam")
 
         def on_failed(msg: str) -> None:
             state["error"] = msg
             dialog.close()
+            self._end_status("medsam")
 
         worker.progress.connect(on_progress)
         worker.finished_ok.connect(on_done)
@@ -259,6 +561,9 @@ class SegmentationPanel(QWidget):
         worker.start()
         dialog.exec()
         worker.wait()
+        # Safety net for pure-cancel paths where neither finished_ok nor
+        # failed fired (worker bailed via interruption without emitting).
+        self._end_status("medsam")
 
         if "error" in state:
             QMessageBox.warning(self, "MedSAM failed", str(state["error"]))
@@ -308,6 +613,7 @@ class SegmentationPanel(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Starting… %p%")
         self.progress_bar.setVisible(True)
+        self._report_status("segmentation", f"Segmenting ({method})")
 
         self._seg_worker = worker
         worker.start()
@@ -327,6 +633,7 @@ class SegmentationPanel(QWidget):
     def _on_seg_progress(self, stage: str, fraction: float) -> None:
         self.progress_bar.setFormat(f"{stage} — %p%")
         self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+        self._update_status("segmentation", f"Segmenting — {stage}")
 
     def _on_seg_ready(self, worker: "_SegmentationWorker", seg) -> None:
         # Only honour the latest worker's result — stale results from
@@ -335,12 +642,27 @@ class SegmentationPanel(QWidget):
             return
         self._document.set_segmentation(seg)
         self.progress_bar.setVisible(False)
+        self._end_status("segmentation")
 
     def _on_seg_failed(self, worker: "_SegmentationWorker", msg: str) -> None:
         if worker is not self._seg_worker:
             return
         self._status.setText(f"Apply failed: {msg}")
         self.progress_bar.setVisible(False)
+        self._end_status("segmentation")
+
+    # --- status helpers ---
+    def _report_status(self, task_id: str, label: str) -> None:
+        if self._status_model is not None:
+            self._status_model.begin(task_id, label)
+
+    def _update_status(self, task_id: str, label: str) -> None:
+        if self._status_model is not None:
+            self._status_model.update(task_id, label)
+
+    def _end_status(self, task_id: str) -> None:
+        if self._status_model is not None:
+            self._status_model.end(task_id)
 
     # --- doc observer ---
     def _on_doc_event(self, kind: str) -> None:
@@ -470,6 +792,14 @@ class SegmentationPanel(QWidget):
         )
 
     def apply_settings(self, s: SegmentationSettings) -> None:
+        """Restore the panel's controls from a saved project. We deliberately
+        do NOT re-run the segmentation here — the user explicitly asked that
+        loading a project leave the mask unset until they hit Apply. This
+        avoids spending CPU cycles on a threshold run the user may not even
+        want (they often just want to scrub the slices first). Project file
+        load still restores any saved companion masks via the mask library,
+        so the on-disk segmentation isn't lost.
+        """
         self._suppress_live = True
         try:
             idx = self.method_combo.findText(s.method)
@@ -491,10 +821,6 @@ class SegmentationPanel(QWidget):
             self.live_preview_checkbox.setChecked(s.live_preview)
         finally:
             self._suppress_live = False
-        # Compute once with the loaded settings so the segmentation appears.
-        # Block so that callers (project load, tests) see a deterministic
-        # state on return.
-        self.run_apply_blocking()
 
     @staticmethod
     def _widen_to_fit(slider: LabeledSlider, target: int) -> None:
@@ -633,5 +959,106 @@ class _SegmentationWorker(QThread):
             # stale finished_ok via the identity check, but we shouldn't even
             # emit if we caught the cancellation early.
             return
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(self, f"{type(e).__name__}: {e}")
+
+
+class _BrushWorker(QThread):
+    """Runs a single click-seed brush evaluation off the UI thread.
+
+    Dispatches by ``kind`` to the appropriate core function. Cancellation:
+    SITK callers can't interrupt mid-call, but requestInterruption + the
+    panel's identity check on finished_ok mean a stale brush click whose
+    result arrives after a newer click is simply discarded.
+    """
+
+    progress = pyqtSignal(str, float)
+    # (worker, mask, method, params)
+    finished_ok = pyqtSignal(object, object, str, dict)
+    failed = pyqtSignal(object, str)
+
+    def __init__(
+        self,
+        *,
+        volume: Volume,
+        seed: tuple[int, int, int],
+        tolerance: float,
+        radius: float,
+        region: Optional[Region],
+        mode: str,
+        kind: str,
+        base_mask,
+        prev_method: str,
+    ) -> None:
+        super().__init__()
+        self._volume = volume
+        self._seed = seed
+        self._tolerance = tolerance
+        self._radius = radius
+        self._region = region
+        self._mode = mode
+        self._kind = kind
+        self._base_mask = base_mask
+        self._prev_method = prev_method
+
+    def _compute_addition(self):
+        """Run the kind-specific math. Returns the 3D bool array to merge."""
+        if self._kind == "region_grow":
+            return grow_from_seed(self._volume, self._seed, self._tolerance, self._region)
+        if self._kind == "threshold":
+            return threshold_from_seed(
+                self._volume, self._seed, self._tolerance, self._region
+            )
+        if self._kind == "sphere":
+            return sphere_from_seed(
+                self._volume, self._seed, self._radius, self._region
+            )
+        if self._kind == "box":
+            return box_from_seed(
+                self._volume, self._seed, self._radius, self._region
+            )
+        if self._kind == "confidence":
+            # The radius slider doubles as the confidence multiplier *10
+            # so the same widget covers both tolerance and multiplier
+            # without adding yet another control. /10 to scale into the
+            # 0.1–10.0 range ConfidenceConnected expects.
+            multiplier = max(0.1, self._tolerance / 100.0) if self._tolerance else 2.5
+            return confidence_grow_from_seed(
+                self._volume,
+                self._seed,
+                multiplier=multiplier,
+                region=self._region,
+            )
+        raise ValueError(f"unknown brush kind: {self._kind!r}")
+
+    def run(self) -> None:
+        try:
+            self.progress.emit(f"Computing {self._kind}", 0.10)
+            addition = self._compute_addition()
+            if self.isInterruptionRequested():
+                return
+            self.progress.emit("Merging", 0.80)
+            new_mask = apply_brush_stroke(
+                self._base_mask, addition, self._mode, self._volume.shape
+            )
+            method_tag = f"brush_{self._kind}"
+            method = (
+                method_tag
+                if not self._prev_method
+                else (
+                    self._prev_method
+                    if self._prev_method.endswith(method_tag)
+                    else f"{self._prev_method}+{method_tag}"
+                )
+            )
+            params = {
+                "seed": tuple(int(v) for v in self._seed),
+                "tolerance": float(self._tolerance),
+                "radius": float(self._radius),
+                "mode": self._mode,
+                "kind": self._kind,
+            }
+            self.progress.emit("Done", 1.0)
+            self.finished_ok.emit(self, new_mask, method, params)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(self, f"{type(e).__name__}: {e}")

@@ -18,9 +18,13 @@ class VolumeRenderer:
         self._renderer = vtk.vtkRenderer()
         self._renderer.SetBackground(0.05, 0.05, 0.08)
         self._volume_actor: vtk.vtkVolume | None = None
+        self._volume_property: vtk.vtkVolumeProperty | None = None
         self._overlay_actor: vtk.vtkActor | None = None
         self._region_actor: vtk.vtkActor | None = None
         self._render_window: vtk.vtkRenderWindow | None = None
+        # Cached so set_windowing can rebuild the transfer function whenever
+        # the user picks a different preset without re-uploading the volume.
+        self._windowing = None  # type: ignore[assignment]
         # Cache the most recently set mask + region so that updates to either
         # one re-render the overlay surface with the correct crop.
         self._latest_mask: np.ndarray | None = None
@@ -32,6 +36,13 @@ class VolumeRenderer:
         self._home_focal: tuple[float, float, float] | None = None
         self._home_view_up: tuple[float, float, float] | None = None
         self._home_parallel_scale: float | None = None
+        # Crosshair planes — three thin translucent rectangles indicating
+        # where the AX/COR/SAG 2D slices currently are. Created lazily on
+        # the first set_volume call. Voxel indices are stored so updates
+        # don't need to re-pass them.
+        self._crosshair_voxel: tuple[int, int, int] | None = None
+        self._crosshair_sources: tuple[vtk.vtkPlaneSource, vtk.vtkPlaneSource, vtk.vtkPlaneSource] | None = None
+        self._crosshair_actors: tuple[vtk.vtkActor, vtk.vtkActor, vtk.vtkActor] | None = None
 
         if os.environ.get("DICOM_VIEWER_OFFSCREEN") == "1" and sys.platform != "win32":
             rw = vtk.vtkRenderWindow()
@@ -43,12 +54,26 @@ class VolumeRenderer:
     def attach_render_window(self, render_window: vtk.vtkRenderWindow) -> None:
         render_window.AddRenderer(self._renderer)
         self._render_window = render_window
+        # Force the trackball-camera style: rotate only while the left button
+        # is held AND the mouse is moving; stop immediately on release. The
+        # VTK default for a 3D scene is vtkInteractorStyleSwitch, which boots
+        # in "joystick" mode — that mode keeps rotating as long as the cursor
+        # is held offset from the click point, which feels like the camera
+        # has a mind of its own. Explicitly installing TrackballCamera makes
+        # rotation strictly mouse-motion-driven and stops the moment the
+        # user releases or stops moving.
+        interactor = render_window.GetInteractor()
+        if interactor is not None:
+            interactor.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
 
     def set_volume(self, volume: Volume) -> None:
         self._volume = volume
         if self._volume_actor is not None:
             self._renderer.RemoveVolume(self._volume_actor)
             self._volume_actor = None
+        # Drop any crosshair actors from the previous volume — they'll be
+        # rebuilt below with the new volume's dimensions.
+        self._destroy_crosshair_actors()
         # Volume rendering only makes sense for >=2 slices. 2D modalities
         # (mammograms, plain X-rays) have z=1 — show nothing in the 3D pane.
         # The slice views still display them normally.
@@ -59,36 +84,17 @@ class VolumeRenderer:
         mapper = vtk.vtkSmartVolumeMapper()
         mapper.SetInputData(image)
         prop = vtk.vtkVolumeProperty()
-        opacity = vtk.vtkPiecewiseFunction()
-        color = vtk.vtkColorTransferFunction()
-        # The opacity ramp's lower edge IS the iso threshold the STL export
-        # uses, so 'what you see is what you get'. Single source of truth in
-        # core.mesh_export.iso_threshold_for_view.
-        from dicom_viewer.core.mesh_export import iso_threshold_for_view
-        iso = iso_threshold_for_view(volume)
-        lo, hi = volume.intensity_range()
-        if volume.modality == "CT":
-            opacity.AddPoint(lo - 1, 0.0)
-            opacity.AddPoint(iso - 1, 0.0)
-            opacity.AddPoint(iso, 0.5)
-            opacity.AddPoint(max(hi, iso + 1), 0.9)
-            color.AddRGBPoint(iso - 1, 0.4, 0.2, 0.1)
-            color.AddRGBPoint(iso, 0.9, 0.8, 0.7)
-            color.AddRGBPoint(max(hi, iso + 1), 1.0, 1.0, 1.0)
-        else:
-            opacity.AddPoint(lo, 0.0)
-            opacity.AddPoint(iso, 0.05)
-            opacity.AddPoint(hi, 0.8)
-            color.AddRGBPoint(lo, 0.1, 0.1, 0.2)
-            color.AddRGBPoint(hi, 1.0, 1.0, 1.0)
-        prop.SetColor(color)
-        prop.SetScalarOpacity(opacity)
         prop.ShadeOn()
         actor = vtk.vtkVolume()
         actor.SetMapper(mapper)
         actor.SetProperty(prop)
         self._renderer.AddVolume(actor)
         self._volume_actor = actor
+        self._volume_property = prop
+        # Build the transfer functions from the current windowing (None means
+        # use the modality default). They get rebuilt whenever windowing
+        # changes so the 3D view tracks Bone/Lung/Soft-tissue presets etc.
+        self._apply_transfer_functions(self._windowing)
         # Set a known default orientation BEFORE letting ResetCamera fit the
         # scene. ResetCamera preserves view direction and view-up, so without
         # this any rotation the user did on the previous volume would carry
@@ -104,6 +110,139 @@ class VolumeRenderer:
         cam.SetViewUp(0.0, 0.0, 1.0)       # Z is up
         self._renderer.ResetCamera()
         self._capture_home_camera()
+        # Crosshair planes — start at the volume's geometric center so the
+        # user immediately sees where each 2D pane is pointing. Updates flow
+        # in from MainWindow as the user scrubs.
+        self._build_crosshair_actors()
+        self.set_crosshair_position(z // 2, y // 2, x // 2)
+
+    # --- crosshair planes -------------------------------------------------
+    def _build_crosshair_actors(self) -> None:
+        """Create three translucent axis-aligned plane actors marking where
+        the AX/COR/SAG 2D slices currently are. Geometry is set later by
+        ``set_crosshair_position`` — here we just instantiate the actors
+        with their colors and opacity."""
+        # Convention: AX = red (looking down Z), COR = green (along Y),
+        # SAG = blue (along X). Matches most clinical viewers.
+        colors = ((1.0, 0.25, 0.25), (0.25, 1.0, 0.25), (0.25, 0.45, 1.0))
+        sources: list[vtk.vtkPlaneSource] = []
+        actors: list[vtk.vtkActor] = []
+        for color in colors:
+            src = vtk.vtkPlaneSource()
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputConnection(src.GetOutputPort())
+            actor = vtk.vtkActor()
+            actor.SetMapper(mapper)
+            prop = actor.GetProperty()
+            prop.SetColor(*color)
+            # ~18% so the volume render is still legible underneath.
+            prop.SetOpacity(0.18)
+            # Disable lighting so the plane keeps its color regardless of
+            # camera angle — these are indicator overlays, not lit surfaces.
+            prop.LightingOff()
+            self._renderer.AddActor(actor)
+            sources.append(src)
+            actors.append(actor)
+        self._crosshair_sources = (sources[0], sources[1], sources[2])
+        self._crosshair_actors = (actors[0], actors[1], actors[2])
+
+    def _destroy_crosshair_actors(self) -> None:
+        if self._crosshair_actors is not None:
+            for a in self._crosshair_actors:
+                self._renderer.RemoveActor(a)
+        self._crosshair_actors = None
+        self._crosshair_sources = None
+        self._crosshair_voxel = None
+
+    def set_windowing(self, center: float, width: float) -> None:
+        """Rebuild the 3D opacity / colour transfer functions for a new
+        windowing preset. The iso threshold is the windowing center, so
+        switching from Bone (center≈500) to Lung (center≈-600) re-isos the
+        rendered surface accordingly. No-op when no volume is loaded.
+        """
+        # Stash so subsequent set_volume re-applies the same window before
+        # the next external set_windowing call.
+        from dicom_viewer.core.document import WindowingState
+
+        self._windowing = WindowingState(center=float(center), width=float(width))
+        if self._volume is None or self._volume_property is None:
+            return
+        self._apply_transfer_functions(self._windowing)
+        self.render()
+
+    def _apply_transfer_functions(self, windowing) -> None:
+        """Rebuild and install the opacity + colour transfer functions on
+        the current volume property using ``windowing`` to set the iso
+        threshold. ``windowing=None`` uses the modality default. Centralised
+        here so set_volume and set_windowing share the math.
+        """
+        if self._volume is None or self._volume_property is None:
+            return
+        from dicom_viewer.core.mesh_export import iso_threshold_for_view
+
+        volume = self._volume
+        iso = iso_threshold_for_view(volume, windowing)
+        lo, hi = volume.intensity_range()
+        opacity = vtk.vtkPiecewiseFunction()
+        color = vtk.vtkColorTransferFunction()
+        if volume.modality == "CT":
+            opacity.AddPoint(lo - 1, 0.0)
+            opacity.AddPoint(iso - 1, 0.0)
+            opacity.AddPoint(iso, 0.5)
+            opacity.AddPoint(max(hi, iso + 1), 0.9)
+            color.AddRGBPoint(iso - 1, 0.4, 0.2, 0.1)
+            color.AddRGBPoint(iso, 0.9, 0.8, 0.7)
+            color.AddRGBPoint(max(hi, iso + 1), 1.0, 1.0, 1.0)
+        else:
+            opacity.AddPoint(lo, 0.0)
+            opacity.AddPoint(iso, 0.05)
+            opacity.AddPoint(hi, 0.8)
+            color.AddRGBPoint(lo, 0.1, 0.1, 0.2)
+            color.AddRGBPoint(hi, 1.0, 1.0, 1.0)
+        self._volume_property.SetColor(color)
+        self._volume_property.SetScalarOpacity(opacity)
+
+    def set_crosshair_position(self, z: int, y: int, x: int) -> None:
+        """Move the AX/COR/SAG indicator planes to the given voxel indices.
+        Coordinates are clamped to the volume bounds so the planes never
+        leave the data. No-op when no volume is loaded."""
+        if self._volume is None or self._crosshair_sources is None:
+            return
+        Z, Y, X = self._volume.shape
+        sz, sy, sx = self._volume.spacing_mm
+        # Clamp so callers can pass un-checked slice indices.
+        z = max(0, min(int(z), Z - 1))
+        y = max(0, min(int(y), Y - 1))
+        x = max(0, min(int(x), X - 1))
+        self._crosshair_voxel = (z, y, x)
+
+        W = X * sx
+        H = Y * sy
+        D = Z * sz
+        # Use mid-voxel world coords so the plane sits between texels rather
+        # than on the boundary (matches how slice renderers position images).
+        wz = (z + 0.5) * sz
+        wy = (y + 0.5) * sy
+        wx = (x + 0.5) * sx
+
+        ax_src, co_src, sa_src = self._crosshair_sources
+        # Axial plane: spans X and Y, fixed at world Z = wz.
+        ax_src.SetOrigin(0.0, 0.0, wz)
+        ax_src.SetPoint1(W, 0.0, wz)
+        ax_src.SetPoint2(0.0, H, wz)
+        # Coronal plane: spans X and Z, fixed at world Y = wy.
+        co_src.SetOrigin(0.0, wy, 0.0)
+        co_src.SetPoint1(W, wy, 0.0)
+        co_src.SetPoint2(0.0, wy, D)
+        # Sagittal plane: spans Y and Z, fixed at world X = wx.
+        sa_src.SetOrigin(wx, 0.0, 0.0)
+        sa_src.SetPoint1(wx, H, 0.0)
+        sa_src.SetPoint2(wx, 0.0, D)
+        self.render()
+
+    @property
+    def crosshair_voxel(self) -> tuple[int, int, int] | None:
+        return self._crosshair_voxel
 
     def _capture_home_camera(self) -> None:
         """Remember the current camera state as the reset target."""

@@ -69,6 +69,51 @@ def test_volume_intensity_range():
     assert hi == 1000
 
 
+def test_voxel_at_click_axial_round_trips_through_slice():
+    """voxel_at_click is the inverse of Volume.slice for click coordinates:
+    given a slice index and a (col, row) inside that slice, it returns the
+    (z, y, x) voxel whose value equals slice[row, col]."""
+    v = _cube_volume()
+    s = v.slice(Orientation.AXIAL, 5)
+    z, y, x = v.voxel_at_click(Orientation.AXIAL, 5, world_xy=(4.0, 6.0))
+    # col=4, row=6, axial slice index=5: array[5, 6, 4] == slice2d[6, 4]
+    assert v.array[z, y, x] == s[6, 4]
+    assert (z, y, x) == (5, 6, 4)
+
+
+def test_voxel_at_click_coronal_undoes_z_flip():
+    """Coronal slices flip z so superior renders on top; voxel_at_click
+    must reverse that flip — clicking on the top of the screen (which the
+    user perceives as superior) must land on a SMALL volume z."""
+    v = _cube_volume()
+    sz = v.shape[0]
+    s = v.slice(Orientation.CORONAL, 5)
+    # Click at row=0 (which is rendered at the BOTTOM of the screen in VTK,
+    # but matters for the flip inverse): array[(sz-1)-0, 5, col] = slice[0, col].
+    z, y, x = v.voxel_at_click(Orientation.CORONAL, 5, world_xy=(4.0, 0.0))
+    assert v.array[z, y, x] == s[0, 4]
+    assert (z, y, x) == (sz - 1, 5, 4)
+    # And the opposite end.
+    z2, _, _ = v.voxel_at_click(Orientation.CORONAL, 5, world_xy=(4.0, float(sz - 1)))
+    assert z2 == 0
+
+
+def test_voxel_at_click_sagittal_undoes_z_flip():
+    v = _cube_volume()
+    sz = v.shape[0]
+    s = v.slice(Orientation.SAGITTAL, 5)
+    z, y, x = v.voxel_at_click(Orientation.SAGITTAL, 5, world_xy=(4.0, 0.0))
+    # array[(sz-1)-0, col, 5] == slice[0, col]
+    assert v.array[z, y, x] == s[0, 4]
+    assert (z, y, x) == (sz - 1, 4, 5)
+
+
+def test_voxel_at_click_rejects_unknown_orientation():
+    v = _cube_volume()
+    with pytest.raises(ValueError):
+        v.voxel_at_click("oblique", 0, (0.0, 0.0))  # type: ignore[arg-type]
+
+
 def test_volume_intensity_percentiles_for_mri_presets():
     arr = np.random.default_rng(0).integers(0, 4096, size=(8, 8, 8), dtype=np.int16)
     v = Volume(array=arr, spacing_mm=(1.0, 1.0, 1.0), modality="MR")

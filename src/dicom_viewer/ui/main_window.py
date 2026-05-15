@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -13,8 +13,11 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QSplitter,
+    QStatusBar,
     QTabWidget,
     QToolBar,
+    QWidget,
 )
 
 from dicom_viewer.core.document import Document, WindowingState
@@ -44,6 +47,7 @@ from dicom_viewer.io.project import (
 from dicom_viewer.ui.panels.export import ExportPanel
 from dicom_viewer.ui.panels.segmentation import SegmentationPanel
 from dicom_viewer.ui.panels.windowing import WindowingPanel
+from dicom_viewer.ui.status_model import StatusModel
 from dicom_viewer.ui.widgets.mesh_preview_view import MeshPreviewView
 from dicom_viewer.ui.widgets.slice_view import SliceView
 from dicom_viewer.ui.widgets.volume3d_view import Volume3DView
@@ -56,6 +60,9 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
 
         self.document = Document()
+        # Single source of truth for 'what's the app currently doing'. Panels
+        # and workers register tasks here; the status bar renders the set.
+        self.status_model = StatusModel()
 
         self.axial = SliceView(Orientation.AXIAL)
         self.coronal = SliceView(Orientation.CORONAL)
@@ -63,15 +70,34 @@ class MainWindow(QMainWindow):
         self.volume3d = Volume3DView()
 
         self.windowing_panel = WindowingPanel(self.document)
-        self.segmentation_panel = SegmentationPanel(self.document)
-        self.export_panel = ExportPanel(self.document)
-        self.stl_preview = MeshPreviewView(self.document, self.export_panel)
+        self.segmentation_panel = SegmentationPanel(self.document, status=self.status_model)
+        self.export_panel = ExportPanel(self.document, status=self.status_model)
+        self.stl_preview = MeshPreviewView(self.document, self.export_panel, status=self.status_model)
 
+        # --- quad view: all four anatomical panes visible at once ---
+        # Standard radiology layout: AX top-left, COR top-right, SAG bottom-
+        # left, 3D bottom-right. Nested QSplitters let the user resize each
+        # row and column by dragging the dividers.
+        top_row = QSplitter(Qt.Orientation.Horizontal)
+        top_row.addWidget(self.axial)
+        top_row.addWidget(self.coronal)
+        top_row.setStretchFactor(0, 1)
+        top_row.setStretchFactor(1, 1)
+        bottom_row = QSplitter(Qt.Orientation.Horizontal)
+        bottom_row.addWidget(self.sagittal)
+        bottom_row.addWidget(self.volume3d)
+        bottom_row.setStretchFactor(0, 1)
+        bottom_row.setStretchFactor(1, 1)
+        self.quad_view = QSplitter(Qt.Orientation.Vertical)
+        self.quad_view.addWidget(top_row)
+        self.quad_view.addWidget(bottom_row)
+        self.quad_view.setStretchFactor(0, 1)
+        self.quad_view.setStretchFactor(1, 1)
+
+        # STL preview stays accessible as a separate tab so it doesn't have
+        # to compete with the four anatomical panes for screen real estate.
         self.view_tabs = QTabWidget()
-        self.view_tabs.addTab(self.axial, "Axial")
-        self.view_tabs.addTab(self.coronal, "Coronal")
-        self.view_tabs.addTab(self.sagittal, "Sagittal")
-        self.view_tabs.addTab(self.volume3d, "3D")
+        self.view_tabs.addTab(self.quad_view, "Multi-view")
         self.view_tabs.addTab(self.stl_preview, "STL Preview")
         self.view_tabs.currentChanged.connect(self._on_view_tab_changed)
         self.setCentralWidget(self.view_tabs)
@@ -138,6 +164,51 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(reset_views_action)
 
+        # --- click-seed tumor brush wiring ---
+        # Panel owns the mode; mainwindow mirrors it to all three slice views
+        # so the user can drop seeds in whichever pane shows the tumor best.
+        self.segmentation_panel.brush_mode_changed.connect(self._on_brush_mode_changed)
+        for sv in (self.axial, self.coronal, self.sagittal):
+            sv.seed_clicked.connect(self.segmentation_panel.handle_seed_click)
+            # Drag events carry the originating orientation so the 2D paint
+            # brush knows which plane it's painting on.
+            sv.seed_dragged.connect(
+                lambda seed, mode, _o=sv.orientation: self.segmentation_panel.handle_seed_drag(
+                    seed, mode, _o
+                )
+            )
+
+        # --- 3D crosshair wiring ---
+        # Each 2D pane drives one axis of the crosshair on the 3D view, so
+        # scrubbing through axial slices moves the red plane, etc.
+        self.axial.slice_changed.connect(self._on_axial_index_changed)
+        self.coronal.slice_changed.connect(self._on_coronal_index_changed)
+        self.sagittal.slice_changed.connect(self._on_sagittal_index_changed)
+
+        # --- bottom status bar: "Currently doing: …" ---
+        # Always visible at the bottom of the window. Each long operation
+        # registers a task on self.status_model; this label re-renders on
+        # every change. Helpful for debugging "why does the app feel slow?"
+        # — at a glance the user can tell whether a worker is in flight.
+        self._status_label = QLabel("Idle")
+        self._status_label.setObjectName("currentlyDoingLabel")
+        sbar: QStatusBar = self.statusBar()
+        sbar.addWidget(self._status_label, stretch=1)
+        self.status_model.changed.connect(self._refresh_status_bar)
+
+        # --- 3D overlay rebuild debounce ---
+        # set_overlay_mask on the 3D view runs vtkDiscreteMarchingCubes which
+        # is expensive on a full-volume mask. Brush bursts (many clicks in a
+        # second) would otherwise trigger one mesh rebuild per click and
+        # freeze the window. 2D slice overlays still update immediately —
+        # they're cheap. We collapse 3D rebuilds into a single run that
+        # fires once the user pauses.
+        self._pending_3d_mask = None
+        self._overlay_3d_debounce = QTimer(self)
+        self._overlay_3d_debounce.setSingleShot(True)
+        self._overlay_3d_debounce.setInterval(250)
+        self._overlay_3d_debounce.timeout.connect(self._apply_pending_3d_overlay)
+
         self.document.subscribe(self._on_doc_event)
 
     def _on_open_folder(self) -> None:
@@ -150,6 +221,7 @@ class MainWindow(QMainWindow):
         # Run the load in a worker thread with a modal progress dialog so the
         # UI stays responsive on big folders (500+ files = many seconds).
         worker = _FolderLoadWorker(Path(folder))
+        self.status_model.begin("folder_load", "Loading DICOM folder…")
         dialog = QProgressDialog("Scanning folder…", "Cancel", 0, 100, self)
         dialog.setWindowTitle("Loading DICOM folder")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -170,18 +242,24 @@ class MainWindow(QMainWindow):
         def on_progress(stage: str, fraction: float) -> None:
             dialog.setLabelText(stage)
             dialog.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+            self.status_model.update(
+                "folder_load", f"Loading DICOM folder — {stage}"
+            )
 
         def on_finished_ok(result: LoadResult) -> None:
             state["result"] = result
             dialog.close()
+            self.status_model.end("folder_load")
 
         def on_failed(msg: str) -> None:
             state["error"] = msg
             dialog.close()
+            self.status_model.end("folder_load")
 
         def on_cancelled() -> None:
             state["cancelled"] = True
             dialog.close()
+            self.status_model.end("folder_load")
 
         worker.progress.connect(on_progress)
         worker.finished_ok.connect(on_finished_ok)
@@ -473,6 +551,37 @@ class MainWindow(QMainWindow):
         # user is actually looking at it.
         self.stl_preview.set_tab_visible(self.view_tabs.widget(index) is self.stl_preview)
 
+    def _on_brush_mode_changed(self, mode: str) -> None:
+        for sv in (self.axial, self.coronal, self.sagittal):
+            sv.set_brush_mode(mode)
+
+    # --- crosshair handlers ---
+    def _push_crosshair_to_3d(self) -> None:
+        """Send the current AX/COR/SAG slice indices to the 3D view so the
+        translucent indicator planes match what the 2D panes are showing."""
+        self.volume3d.set_crosshair_position(
+            self.axial.current_index,
+            self.coronal.current_index,
+            self.sagittal.current_index,
+        )
+
+    def _on_axial_index_changed(self, _value: int) -> None:
+        self._push_crosshair_to_3d()
+
+    def _on_coronal_index_changed(self, _value: int) -> None:
+        self._push_crosshair_to_3d()
+
+    def _on_sagittal_index_changed(self, _value: int) -> None:
+        self._push_crosshair_to_3d()
+
+    def _refresh_status_bar(self) -> None:
+        self._status_label.setText(self.status_model.render())
+
+    def _apply_pending_3d_overlay(self) -> None:
+        """Flush the most recent segmentation mask into the 3D overlay.
+        Triggered by the debounce timer to coalesce rapid updates."""
+        self.volume3d.set_overlay_mask(self._pending_3d_mask)
+
     def _on_reset_views(self) -> None:
         self.axial.reset_view()
         self.coronal.reset_view()
@@ -489,17 +598,28 @@ class MainWindow(QMainWindow):
             self.coronal.set_volume(volume)
             self.sagittal.set_volume(volume)
             self.volume3d.set_volume(volume)
+            # The 2D panes default to their middle slice; mirror that on the
+            # 3D crosshair so all four panes start in agreement.
+            self._push_crosshair_to_3d()
         if kind in ("study", "windowing"):
             w = self.document.windowing
             self.axial.set_windowing(w.center, w.width)
             self.coronal.set_windowing(w.center, w.width)
             self.sagittal.set_windowing(w.center, w.width)
+            # The 3D view's opacity ramp also tracks windowing — without
+            # this, switching to Lung/Soft-tissue presets would leave the
+            # 3D pane frozen at the previous iso threshold.
+            self.volume3d.set_windowing(w.center, w.width)
         if kind == "segmentation":
             mask = self.document.segmentation.mask if self.document.segmentation else None
+            # 2D overlays update on every change — slicing a 3D mask is cheap.
             self.axial.set_overlay_mask(mask)
             self.coronal.set_overlay_mask(mask)
             self.sagittal.set_overlay_mask(mask)
-            self.volume3d.set_overlay_mask(mask)
+            # 3D overlay rebuild is expensive (marching cubes). Debounce it
+            # so rapid brush clicks don't queue up a mesh rebuild per click.
+            self._pending_3d_mask = mask
+            self._overlay_3d_debounce.start()
         if kind in ("study", "region"):
             self.volume3d.set_region(self.document.region)
 

@@ -46,7 +46,10 @@ def main() -> int:
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
-    window.show()
+    # Start maximised so the four-panel quad has room to breathe. We use
+    # showMaximized rather than showFullScreen so the OS title bar stays
+    # available — users can still resize/move if they want.
+    window.showMaximized()
     _apply_startup_argument(window, sys.argv[1:])
     return app.exec()
 

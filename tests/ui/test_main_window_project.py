@@ -38,7 +38,10 @@ def test_round_trip_project_through_main_window(qtbot, tmp_path):
     project_path = tmp_path / f"proj{PROJECT_EXTENSION}"
     save_project(project_path, win1.collect_project())
 
-    # Second window: load the project, expect settings + segmentation to come back.
+    # Second window: load the project. Settings must come back, but the
+    # segmentation must NOT auto-run on load — the user has to hit Apply.
+    # This is the explicit contract: avoid spending CPU cycles on a
+    # threshold the user may not even want until they ask for it.
     win2 = MainWindow()
     qtbot.addWidget(win2)
     assert win2.load_project_from_path(project_path)
@@ -47,7 +50,10 @@ def test_round_trip_project_through_main_window(qtbot, tmp_path):
     assert win2.segmentation_panel.low_slider.value() == -500
     assert win2.segmentation_panel.high_slider.value() == 0
     assert win2.document.volume is not None
-    # Applying the project triggered the live-preview, so a segmentation exists.
+    # No segmentation until the user clicks Apply (or loads a companion mask).
+    assert win2.document.segmentation is None
+    # Apply explicitly to confirm the loaded settings can run.
+    win2.segmentation_panel.run_apply_blocking()
     assert win2.document.segmentation is not None
 
 
@@ -161,6 +167,131 @@ def test_mask_library_round_trips_through_project(qtbot, tmp_path):
     assert win2.document.segmentation is not None
     # The two masks have distinct voxel counts (the thresholds were different).
     assert win2.document.get_mask("A").voxel_count != win2.document.get_mask("B").voxel_count
+
+
+def test_quad_view_contains_all_four_anatomical_panes(qtbot):
+    """The central widget is a tab widget whose first tab is the 2×2 quad
+    layout. All four anatomical panes (axial, coronal, sagittal, 3D) live
+    inside it as descendants — no longer hidden behind tab switches."""
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.view_tabs.count() == 2
+    assert win.view_tabs.tabText(0) == "Multi-view"
+    assert win.view_tabs.tabText(1) == "STL Preview"
+    # All four panes are descendants of the quad widget.
+    for pane in (win.axial, win.coronal, win.sagittal, win.volume3d):
+        assert win.quad_view.isAncestorOf(pane), pane
+
+
+def test_changing_windowing_preset_rebuilds_3d_opacity(qtbot, tmp_path):
+    """Regression: switching to a non-default windowing preset (e.g. Lung)
+    used to leave the 3D pane frozen on the bone iso because set_volume
+    built the opacity ramp once and never rebuilt. Today set_windowing
+    re-applies the transfer function, so the 3D view tracks the preset."""
+    from dicom_viewer.core.document import WindowingState
+
+    series_dir = make_synthetic_ct_series(tmp_path, shape=(6, 8, 8))
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.open_folder_path(series_dir)
+    vr = win.volume3d._renderer
+    # Probe the opacity TF at the synthetic CT's value (1000 raw → -24 HU
+    # after rescale on these fixtures); switching to a different center
+    # must change what's opaque there.
+    op_default = vr._volume_property.GetScalarOpacity().GetValue(-24.0)
+    win.document.set_windowing(WindowingState(center=-600.0, width=1500.0))
+    op_lung = vr._volume_property.GetScalarOpacity().GetValue(-24.0)
+    assert op_default != pytest.approx(op_lung)
+
+
+def test_scrubbing_a_2d_pane_updates_the_3d_crosshair(qtbot, tmp_path):
+    """Each anatomical pane drives one axis of the 3D crosshair: scrubbing
+    axial moves the red plane, etc. Verify by changing the axial scrollbar
+    and checking the 3D renderer's recorded voxel."""
+    series_dir = make_synthetic_ct_series(tmp_path, shape=(8, 8, 8))
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.open_folder_path(series_dir)
+    win.axial.scrollbar.setValue(2)
+    win.coronal.scrollbar.setValue(5)
+    win.sagittal.scrollbar.setValue(6)
+    z, y, x = win.volume3d._renderer.crosshair_voxel
+    assert (z, y, x) == (2, 5, 6)
+
+
+def test_status_bar_starts_idle_and_reflects_status_model(qtbot):
+    """The 'Currently doing' label at the bottom of the window mirrors the
+    StatusModel. Start idle; flipping a fake task on the model updates the
+    label; ending it returns to Idle. This is the contract MainWindow uses
+    to surface long ops from the brush, STL preview, folder load, etc."""
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win._status_label.text() == "Idle"
+    win.status_model.begin("fake", "Fake work")
+    assert "Fake work" in win._status_label.text()
+    win.status_model.end("fake")
+    assert win._status_label.text() == "Idle"
+
+
+def test_status_bar_updates_when_folder_loader_runs(qtbot, tmp_path):
+    """Loading a folder must register a task on the status model so the user
+    sees 'Currently doing: Loading DICOM folder…' instead of staring at an
+    OS-frozen window. We capture the label sequence and assert it transitions
+    out-of and back-to Idle."""
+    series_dir = make_synthetic_ct_series(tmp_path, shape=(3, 4, 4))
+    win = MainWindow()
+    qtbot.addWidget(win)
+    seen: list[str] = []
+    win.status_model.changed.connect(
+        lambda: seen.append(win.status_model.render())
+    )
+    assert win.open_folder_path(series_dir)
+    # At some point during the load, render() should have included the label.
+    assert any("Loading DICOM folder" in s for s in seen), seen
+    # And we end back at idle.
+    assert win.status_model.is_idle
+    assert win._status_label.text() == "Idle"
+
+
+def test_rapid_segmentation_changes_collapse_into_one_3d_overlay_rebuild(qtbot, tmp_path):
+    """Regression: every segmentation event used to fire volume3d.set_overlay_mask
+    synchronously, which runs marching cubes on the full mask. Brush bursts (one
+    click ≈ one segmentation event) made the window freeze. The MainWindow now
+    debounces 3D-overlay rebuilds with a QTimer; 2D overlays stay immediate. We
+    verify by counting set_overlay_mask calls on the 3D view across N rapid
+    changes — they should collapse to a single call."""
+    import numpy as np
+
+    from dicom_viewer.core.segmentation.base import Segmentation
+
+    series_dir = make_synthetic_ct_series(tmp_path, shape=(4, 8, 8))
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.open_folder_path(series_dir)
+
+    calls: list[object] = []
+    original = win.volume3d.set_overlay_mask
+    def spy(mask):
+        calls.append(mask)
+        return original(mask)
+    win.volume3d.set_overlay_mask = spy  # type: ignore[assignment]
+    # Drop any debounce-triggered call queued by the initial load.
+    qtbot.wait(win._overlay_3d_debounce.interval() + 100)
+    calls.clear()
+
+    vol = win.document.volume
+    mask = np.zeros(vol.shape, dtype=bool)
+    mask[1, 1, 1] = True
+    # Fire several segmentation events in quick succession.
+    for i in range(5):
+        m = mask.copy()
+        m[1, i % vol.shape[1], 1] = True
+        win.document.set_segmentation(Segmentation(mask=m, method="test"))
+    # Before the debounce expires, the 3D overlay must not have rebuilt yet.
+    assert calls == []
+    # After the debounce, exactly one rebuild for the most recent state.
+    qtbot.wait(win._overlay_3d_debounce.interval() + 100)
+    assert len(calls) == 1
 
 
 def test_load_corrupt_project_does_not_crash(qtbot, tmp_path, monkeypatch):

@@ -42,18 +42,20 @@ class EmptyMeshError(Exception):
     """The chosen segmentation/region intersection produced zero voxels or zero triangles."""
 
 
-def iso_threshold_for_view(volume: Volume) -> float:
+def iso_threshold_for_view(volume: Volume, windowing=None) -> float:
     """Intensity threshold at which the 3D view's transfer function makes
     the surface visibly opaque. Single source of truth used by BOTH the 3D
     volume renderer's opacity ramp AND the STL iso-surface fallback, so the
     STL matches what's on screen ('what you see is what you get').
 
-    Per-modality reasoning:
-    - CT: 300 HU is the classic bone threshold, also the lower-edge of the
-      opacity ramp in VolumeRenderer's CT transfer function.
-    - MR / unknown: 30% into the volume's measured intensity range — matches
-      where VolumeRenderer's generic transfer function starts ramping.
+    When a ``WindowingState`` is supplied, the threshold tracks the window's
+    center — so the user can switch from Bone to Lung to Soft-tissue presets
+    and the 3D view re-isos accordingly. Without it we fall back to the old
+    hardcoded defaults so call sites that don't yet thread windowing keep
+    working.
     """
+    if windowing is not None:
+        return float(windowing.center)
     if volume.modality == "CT":
         return 300.0
     lo, hi = volume.intensity_range()
@@ -63,13 +65,15 @@ def iso_threshold_for_view(volume: Volume) -> float:
 def resolve_export_segmentation(
     volume: Volume,
     segmentation: "Segmentation | None",
+    windowing=None,
 ) -> "tuple[Segmentation, str]":
     """Pick the mask to mesh for STL export or preview.
 
     If a user-applied segmentation is present, use it. Otherwise build the
-    iso-surface mask at `iso_threshold_for_view(volume)` — the same surface
-    visible in the 3D view. Returns (segmentation, label) where `label` is
-    `'user-segmentation'` or `'iso@<value>'` for UI display.
+    iso-surface mask at ``iso_threshold_for_view(volume, windowing)`` —
+    the same surface visible in the 3D view. Returns (segmentation, label)
+    where ``label`` is ``'user-segmentation'`` or ``'iso@<value>'`` for
+    UI display.
 
     Raises EmptyMeshError if the resulting mask is empty.
     """
@@ -80,7 +84,7 @@ def resolve_export_segmentation(
     if segmentation is not None:
         return segmentation, "user-segmentation"
 
-    iso_value = iso_threshold_for_view(volume)
+    iso_value = iso_threshold_for_view(volume, windowing)
     _, hi = volume.intensity_range()
     iso_seg = threshold(volume, iso_value, max(hi, iso_value))
     if iso_seg.is_empty:

@@ -82,10 +82,13 @@ class MeshPreviewView(QWidget):
 
     DEBOUNCE_MS = 300
 
-    def __init__(self, document: Document, export_panel) -> None:
+    def __init__(self, document: Document, export_panel, status=None) -> None:
         super().__init__()
         self._document = document
         self._export_panel = export_panel
+        # Optional StatusModel for surfacing 'currently generating preview' in
+        # the bottom bar. Constructed without it in tests.
+        self._status_model = status
         self._worker: _PreviewWorker | None = None
         self._refresh_pending = True
         self._tab_visible = False
@@ -157,7 +160,10 @@ class MeshPreviewView(QWidget):
             # sense for the new geometry — refit on the next render.
             self._preview.request_fit()
             self.schedule_refresh()
-        elif kind in ("segmentation", "region"):
+        elif kind in ("segmentation", "region", "windowing"):
+            # Windowing drives the iso threshold for the no-segmentation
+            # fallback — switching presets must refresh the STL preview to
+            # stay WYSIWYG with the 3D pane.
             self.schedule_refresh()
 
     def _maybe_run_worker(self) -> None:
@@ -178,7 +184,7 @@ class MeshPreviewView(QWidget):
         # preview (and the exported STL) matches what the 3D pane shows.
         try:
             seg, label = resolve_export_segmentation(
-                volume, self._document.segmentation
+                volume, self._document.segmentation, self._document.windowing
             )
         except EmptyMeshError as e:
             self._preview.set_mesh(None)
@@ -201,11 +207,15 @@ class MeshPreviewView(QWidget):
         self._worker.finished_ok.connect(self._on_mesh_ready)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished.connect(self._on_worker_done)
+        if self._status_model is not None:
+            self._status_model.begin("stl_preview", "Generating STL preview…")
         self._worker.start()
 
     def _on_progress(self, stage: str, fraction: float) -> None:
         self.progress_bar.setFormat(f"{stage} — %p%")
         self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+        if self._status_model is not None:
+            self._status_model.update("stl_preview", f"STL preview — {stage}")
 
     def _on_mesh_ready(self, mesh: Mesh) -> None:
         self._preview.set_mesh(mesh)
@@ -229,6 +239,11 @@ class MeshPreviewView(QWidget):
         self._render_if_live()
 
     def _on_worker_done(self) -> None:
+        # Worker exited (either success or failure). Clear the bottom status
+        # entry — _on_mesh_ready / _on_failed handle the inline progress bar
+        # but the global status model needs an explicit end() either way.
+        if self._status_model is not None:
+            self._status_model.end("stl_preview")
         # If the user changed settings while the worker was running, schedule
         # another pass now that we're free.
         if self._refresh_pending and self._tab_visible:

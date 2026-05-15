@@ -28,6 +28,14 @@ class MeshPreview:
     def attach_render_window(self, render_window: vtk.vtkRenderWindow) -> None:
         render_window.AddRenderer(self._renderer)
         self._render_window = render_window
+        # See VolumeRenderer.attach_render_window — VTK's default 3D style
+        # (vtkInteractorStyleSwitch) starts in joystick mode where holding
+        # the cursor offset keeps the camera rotating without further mouse
+        # motion. Trackball-camera mode rotates only while the mouse is
+        # actually moving and stops on release.
+        interactor = render_window.GetInteractor()
+        if interactor is not None:
+            interactor.SetInteractorStyle(vtk.vtkInteractorStyleTrackballCamera())
 
     def request_fit(self) -> None:
         """Request that the next set_mesh() re-frame the camera. Call when

@@ -70,6 +70,13 @@ class Volume3DView(QWidget):
         self._renderer.set_overlay_mask(mask)
         self._render_if_live()
 
+    def set_windowing(self, center: float, width: float) -> None:
+        """Re-iso the 3D view to the new windowing preset. Without this the
+        opacity transfer function stays frozen at the bone default and
+        Bone/Lung/Soft-tissue presets don't change what's rendered."""
+        self._renderer.set_windowing(center, width)
+        self._render_if_live()
+
     def set_region(self, region: Region | None) -> None:
         if region is None or self._volume is None:
             return
@@ -78,6 +85,12 @@ class Volume3DView(QWidget):
 
     def reset_view(self) -> None:
         self._renderer.reset_view()
+
+    def set_crosshair_position(self, z: int, y: int, x: int) -> None:
+        """Move the AX/COR/SAG indicator planes to the given voxel position.
+        Called by MainWindow whenever the user scrubs one of the 2D panes."""
+        self._renderer.set_crosshair_position(z, y, x)
+        self._render_if_live()
 
     def _render_if_live(self) -> None:
         if hasattr(self._vtk_widget, "GetRenderWindow"):

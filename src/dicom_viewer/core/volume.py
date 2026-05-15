@@ -73,6 +73,30 @@ class Volume:
         sub = self.array[r.z[0] : r.z[1], r.y[0] : r.y[1], r.x[0] : r.x[1]]
         return Volume(array=sub, spacing_mm=self.spacing_mm, modality=self.modality)
 
+    def voxel_at_click(
+        self,
+        orientation: Orientation,
+        slice_index: int,
+        world_xy: tuple[float, float],
+    ) -> tuple[int, int, int]:
+        """Inverse of ``slice``: map a slice-view click (in the slice's world
+        coordinates, where wx = column and wy = row in the 2D image) back to
+        a ``(z, y, x)`` voxel index in this volume's array.
+
+        Coronal and sagittal slices flip the z axis so superior ends up at
+        the top of the screen; this method reverses that flip.
+        """
+        sz, sy, sx = self.shape
+        col = int(round(world_xy[0]))
+        row = int(round(world_xy[1]))
+        if orientation is Orientation.AXIAL:
+            return (slice_index, row, col)
+        if orientation is Orientation.CORONAL:
+            return ((sz - 1) - row, slice_index, col)
+        if orientation is Orientation.SAGITTAL:
+            return ((sz - 1) - row, col, slice_index)
+        raise ValueError(f"unknown orientation {orientation!r}")
+
     def intensity_range(self) -> tuple[float, float]:
         return (float(self.array.min()), float(self.array.max()))
 

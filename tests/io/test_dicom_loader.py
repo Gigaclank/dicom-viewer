@@ -226,6 +226,35 @@ def test_folder_loads_2d_files_without_image_position_patient(tmp_path):
         assert "0250." in s.display_name
 
 
+def test_folder_scan_uses_thread_pool_for_metadata_read(tmp_path, monkeypatch):
+    """The folder header scan is parallelized — regression for the previous
+    single-threaded scan that dominated load time on big folders. We assert
+    by patching ThreadPoolExecutor and confirming it gets instantiated."""
+    from concurrent import futures as _futures
+
+    folder = make_synthetic_ct_series(tmp_path, shape=(8, 4, 4))
+
+    calls: list[int] = []
+    orig_executor = _futures.ThreadPoolExecutor
+
+    class _CountingExecutor(orig_executor):  # type: ignore[misc]
+        def __init__(self, *a, **kw):
+            calls.append(kw.get("max_workers", 0))
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(
+        "dicom_viewer.io.dicom_loader.ThreadPoolExecutor",
+        _CountingExecutor,
+    )
+    result = load_series_from_folder(folder)
+    # Two executors fire on a multi-slice load: one for header scan (phase 1),
+    # one for pixel decode (phase 2). Both should use >1 worker.
+    assert len(calls) >= 1
+    assert all(w > 1 for w in calls), calls
+    assert len(result.studies) == 1
+    assert result.studies[0].volume.shape == (8, 4, 4)
+
+
 def test_load_folder_skips_a_broken_series_keeps_good_ones(tmp_path):
     """A pathological series shouldn't take down the whole folder load."""
     import pydicom

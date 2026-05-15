@@ -62,7 +62,7 @@ class _ExportWorker(QThread):
             if volume is None:
                 raise EmptyMeshError("no volume loaded")
             seg, _label = resolve_export_segmentation(
-                volume, self._document.segmentation
+                volume, self._document.segmentation, self._document.windowing
             )
             region = self._document.region or volume.bbox()
             mesh = generate_mesh(
@@ -93,9 +93,11 @@ class ExportPanel(QWidget):
     settings_changed = pyqtSignal()
     mesh_ready = pyqtSignal(object)
 
-    def __init__(self, document: Document) -> None:
+    def __init__(self, document: Document, status=None) -> None:
         super().__init__()
         self._document = document
+        # Optional StatusModel (None when constructed outside MainWindow).
+        self._status_model = status
 
         # Reasonable practical limits — values above 50 smoothing iterations or
         # above ~0.9 decimation rarely produce better results.
@@ -217,15 +219,27 @@ class ExportPanel(QWidget):
         # No cancel — generate_mesh's VTK filters don't expose abort hooks.
         dialog.setCancelButton(None)  # type: ignore[arg-type]
 
+        task_id = "stl_export" if out_path is not None else "stl_mesh"
+        if self._status_model is not None:
+            label = "Exporting STL" if out_path is not None else "Generating mesh"
+            self._status_model.begin(task_id, label)
+
         def on_progress(stage: str, fraction: float) -> None:
             dialog.setLabelText(stage)
             dialog.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+            if self._status_model is not None:
+                label = "Exporting STL" if out_path is not None else "Generating mesh"
+                self._status_model.update(task_id, f"{label} — {stage}")
 
         def on_done(_path: str, _triangle_count: int) -> None:
             dialog.close()
+            if self._status_model is not None:
+                self._status_model.end(task_id)
 
         def on_failed(_msg: str) -> None:
             dialog.close()
+            if self._status_model is not None:
+                self._status_model.end(task_id)
 
         worker.progress.connect(on_progress)
         worker.finished_ok.connect(on_done)
@@ -241,6 +255,9 @@ class ExportPanel(QWidget):
         # Cross-thread signals were queued onto the main thread while it was
         # blocked in wait(); drain the queue so slots run before we return.
         QCoreApplication.processEvents()
+        # Safety net — clear status if neither finished_ok nor failed fired.
+        if self._status_model is not None:
+            self._status_model.end(task_id)
 
     # --- worker callbacks ---
     def _on_mesh_ready(self, mesh: Mesh) -> None:
